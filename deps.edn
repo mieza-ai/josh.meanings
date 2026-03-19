@@ -5,8 +5,8 @@
         techascent/tech.ml.dataset {:mvn/version "7.030"}
         generateme/fastmath {:mvn/version "2.4.0"}
         uncomplicate/neanderthal {:mvn/version "0.49.1"}
-        org.bytedeco/mkl {:mvn/version "2024.0-1.5.10" :classifier "linux-x86_64-redist"}
-        org.bytedeco/cuda {:mvn/version "12.3-8.9-1.5.10" :classifier "linux-x86_64-redist"}
+        org.bytedeco/mkl$linux-x86_64-redist {:mvn/version "2024.0-1.5.10"}
+        org.bytedeco/cuda$linux-x86_64-redist {:mvn/version "12.3-8.9-1.5.10"}
         cnuernber/dtype-next {:mvn/version "10.113"}
         org.apache.arrow/arrow-vector {:mvn/version "6.0.0"
                                        :exclusions [commons-codec/commons-codec
@@ -16,7 +16,7 @@
                                                     org.slf4j/slf4j-api]}
         com.cnuernber/jarrow {:mvn/version "1.000"}
         org.apache.commons/commons-compress {:mvn/version "1.21"}
-        progrock {:mvn/version "0.1.2"}
+        progrock/progrock {:mvn/version "0.1.2"}
         bsless/clj-fast {:mvn/version "0.0.11"}
         org.lz4/lz4-java {:mvn/version "1.8.0"}
         ch.qos.logback/logback-classic {:mvn/version "1.2.10" :exclusions [org.slf4j/slf4j-api]}
@@ -33,7 +33,7 @@
         org.apache.hadoop/hadoop-mapreduce-client-core {:mvn/version "3.3.0"
                                                         :exclusions [org.slf4j/slf4j-log4j12]}
         org.clojars.joshua/sampling {:mvn/version "3.3"}}
- :aliases {:dev {:extra-deps {criterium {:mvn/version "0.4.6"}
+ :aliases {:dev {:extra-deps {criterium/criterium {:mvn/version "0.4.6"}
                               org.clojure/test.check {:mvn/version "1.1.1"}
                               com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.0.3"}
                               com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.4"}
