@@ -1,6 +1,8 @@
 (defproject ai.mieza/mieza.meanings (or (System/getenv "PROJECT_VERSION") "3.0.14")
   :description "GPU-accelerated K-Means clustering for Clojure. Handles larger-than-memory datasets."
   :url "https://github.com/tacktechai/mieza.meanings"
+  :scm {:name "git"
+        :url "https://github.com/tacktechai/mieza.meanings"}
   :license {:name "The MIT License"
             :url "https://opensource.org/licenses/MIT"}
   :dependencies [[org.clojure/clojure "1.12.4"]

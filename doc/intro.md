@@ -38,7 +38,7 @@ The list of supported formats are:
  - `:arrows`
  - `:parquet`
 
-By default the `:parquet` format will be used.
+By default the `:arrow` format is used (see `mieza.meanings.kmeans/default-options`).
 
 ## Distance Functions
 

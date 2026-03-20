@@ -1,0 +1,32 @@
+# mieza.meanings
+
+> GPU-accelerated k-means clustering for Clojure. Targets "medium" datasets—too
+> large to fit in RAM—using memory-mapped I/O (e.g. Arrow) and optional OpenCL
+> distance math. Pluggable distance functions and initialization methods.
+
+## Documentation
+
+- [README](https://github.com/tacktechai/mieza.meanings/blob/main/README.md): install, quick start
+- [API guide](https://github.com/tacktechai/mieza.meanings/blob/main/doc/intro.md): formats, distances, inits, options
+- [Agent / contributor guide](https://github.com/tacktechai/mieza.meanings/blob/main/AGENTS.md): build, layout, boundaries
+- [Changelog](https://github.com/tacktechai/mieza.meanings/blob/main/CHANGELOG.md): releases
+- [API reference (cljdoc)](https://cljdoc.org/d/ai.mieza/mieza.meanings): generated docs once published
+
+## Core API
+
+- [k-means multimethod](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/kmeans.clj): file path or lazy dataset seq → `ClusterResult`
+- [k-means-seq](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/kmeans.clj): lazy seq of repeated runs (pick lowest `:cost`)
+- [Savable — save-model](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/protocols/savable.clj): persist `ClusterResult`
+- [load-model](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/records/cluster_result.clj): reload `ClusterResult`
+- [Classifier — assignments](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/protocols/classifier.clj): batch assign new chunks to clusters
+
+## Optional depth
+
+- [Distances](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/distances.clj): `:distance-key`, GPU-capable subset
+- [Initializations](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/initializations/core.clj): `:init` multimethod
+- [Persistence formats](https://github.com/tacktechai/mieza.meanings/blob/main/src/clj/mieza/meanings/persistence.clj): `:arrow`, `:csv`, `:parquet`, `:arrows`
+- [Security policy](https://github.com/tacktechai/mieza.meanings/blob/main/SECURITY.md)
+
+## Full inline reference
+
+For a single-file context without following links, see `llms-full.txt` in this repository.

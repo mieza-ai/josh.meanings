@@ -1,5 +1,9 @@
 # mieza.meanings
 
+[![Clojars Project](https://img.shields.io/clojars/v/ai.mieza/mieza.meanings.svg)](https://clojars.org/ai.mieza/mieza.meanings)
+[![cljdoc](https://cljdoc.org/badge/ai.mieza/mieza.meanings)](https://cljdoc.org/d/ai.mieza/mieza.meanings)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 GPU-accelerated K-Means clustering for Clojure. Built to handle "medium data" workloads —
 datasets too large to fit in memory, but not so large that the computation cannot be
 persisted to disk.
@@ -17,8 +21,6 @@ themselves toward making this implementation quite a bit faster than alternative
 
 ## Installation
 
-[![Clojars Project](https://img.shields.io/clojars/v/ai.mieza/mieza.meanings.svg)](https://clojars.org/ai.mieza/mieza.meanings)
-
 If you use the Clojure CLI, add the library to your `deps.edn`:
 
 ```clojure
@@ -30,41 +32,39 @@ ai.mieza/mieza.meanings {:mvn/version "3.0.14"}
 ```clojure
 (require '[mieza.meanings.kmeans :refer [k-means k-means-seq]]
          '[mieza.meanings.protocols.savable :refer [save-model]]
-         '[mieza.meanings.protocols.classifier :refer [classify load-centroids load-assignments]])
+         '[mieza.meanings.protocols.classifier :refer [assignments]]
+         '[mieza.meanings.records.cluster-result :refer [load-model]])
 
-
-;; Get a dataset.  You can pass in your dataset under a variety of formats.
-;; See the docs for more details on supported formats.
+;; Dataset: file path (CSV / Parquet / Arrow, etc.) or a lazy seq of datasets
 (def dataset "your_dataset.csv")
 
-;; Choose the number of clusters you want
 (def k 10)
 
-
-;; To get a single cluster model
+;; Single clustering run → ClusterResult
 (def model (k-means dataset k))
 
-;; Alternatively you can run k means multiple times.  This is recommended because
-;; some k means initializations don't give guarantees on the quality of a solution
-;; and so you can get better results by running k means multiple times and taking
-;; the best result.
-(def model (apply min-key :cost (take k-tries (k-means-seq cluster-dataset-name k))))
+;; Multiple runs — keep the lowest objective (:cost)
+(def k-tries 10)
+(def best (apply min-key :cost (take k-tries (k-means-seq dataset k))))
 
-;; Once you have a model you can save it.
-(def model-path (.save-model model))
+;; Persist and reload (EDN on disk)
+(def path "cluster-model.edn")
+(save-model best path)
+(def reloaded (load-model path))
 
-;; Later you can load that model
-(def model (load-model model-path))
+;; Centroids and cost are record fields
+(:centroids reloaded)
+(:cost reloaded)
 
-;; To load the assignments just
-(.load-assignments model)
-
-;; To classify a new entry
-(.classify model [1 2 3])
-
-;; To view the centroids
-(.load-centroids model)
+;; Batch-assign new dataset chunks to clusters (lazy seq of datasets)
+;; (assignments reloaded your-dataset-seq)
 ```
+
+### Note on CHANGELOG / older examples
+
+Some release notes refer to `.classify`, `.load-centroids`, or `.load-assignments` on
+`ClusterResult`. The current public surface uses the `ClusterResult` record fields
+and the `assignments` protocol for new data; see `llms-full.txt` or `doc/intro.md` for detail.
 
 ## Testing
 

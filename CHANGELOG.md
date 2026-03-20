@@ -8,8 +8,15 @@ releases might only add additional tests and/or documentation updates rather tha
 
 ## [Unreleased]
 
+### Added
+
+- GitHub issue and PR templates, `CODEOWNERS`, `AGENTS.md`, `llms.txt`, and `llms-full.txt`.
+- cljdoc sidebar config (`doc/cljdoc.edn`) and `:scm` metadata in `project.clj` for published docs.
+
 ### Changed
 
+- README quick start now matches the current `ClusterResult` / `save-model` / `load-model` / `assignments` API; added cljdoc and MIT badges.
+- `doc/intro.md`: documented that the default `:format` is `:arrow` (per `kmeans` defaults).
 - Rebranded from `josh.meanings` to `mieza.meanings` under [mieza.ai](https://mieza.ai) stewardship.
 - Artifact coordinates changed from `org.clojars.joshua/josh.meanings` to `ai.mieza/mieza.meanings`.
 - All namespaces renamed from `josh.meanings.*` to `mieza.meanings.*`.
