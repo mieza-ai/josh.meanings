@@ -159,6 +159,22 @@
   (ds/->dataset [(rand-nth (into [] (hamf/pmap ds/rand-nth (p/read-dataset-seq conf :points))))]))
 
 
+(def ^:const d2-weight-col "__d2_weight")
+
+(defn add-d2-weights
+  "Adds a D² weight column to each dataset in ds-seq. Each row gets the squared
+   distance to its nearest centroid. Returns a new lazy seq of datasets."
+  [config ds-seq centroids]
+  (let [distance-fn (:distance-fn config)]
+    (hfl/map
+     (fn [dataset]
+       (let [weights (mapv (fn [row]
+                             (let [point (vec (vals row))]
+                               (reduce min (map #(Math/pow (double (distance-fn point %)) 2.0) centroids))))
+                           (ds/rows dataset))]
+         (assoc dataset d2-weight-col weights)))
+     ds-seq)))
+
 (defn shortest-distance-*
   "Denotes the shortest distance from a data point to a 
 	 center. Which distance to use is decided by the k means 

@@ -4,12 +4,22 @@
    [mieza.meanings.persistence :as persist]
    [clojure.spec.alpha :as s]
    [mieza.meanings.initializations.utils :refer
-    [uniform-sample weighted-sample shortest-distance-squared-*]])
+    [uniform-sample weighted-sample add-d2-weights d2-weight-col]])
   (:use
    [mieza.meanings.initializations.core]))
 
 (def t-config :mieza.meanings.specs/configuration)
 (def t-dataset :mieza.meanings.specs/dataset)
+
+(defn- weighted-sample-vecs
+  "Weighted sample that returns row vectors, extracting only data columns."
+  [config ds-seq centers n]
+  (let [col-names (:col-names config)
+        rows (weighted-sample (add-d2-weights config ds-seq centers)
+                              d2-weight-col
+                              n)]
+    (mapv (fn [row] (mapv #(get row %) col-names)) rows)))
+
 (s/fdef k-means-parallel :args (s/cat :config t-config) :ret t-dataset)
 (defn k-means-parallel
   [config]
@@ -26,9 +36,7 @@
           (log/info "Finished oversampling. Reducing to k centroids")
           (:centroids (k-means (rows->maps centers) k :init :k-means-++ :distance-fn (:distance-key config))))
         (recur (inc i) (concat centers
-                               (weighted-sample ds-seq
-                                                (shortest-distance-squared-* config centers)
-                                                oversample-factor)))))))
+                               (weighted-sample-vecs config ds-seq centers oversample-factor)))))))
 
 
 (defmethod initialize-centroids

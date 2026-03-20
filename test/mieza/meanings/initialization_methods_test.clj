@@ -1,13 +1,5 @@
 (ns mieza.meanings.initialization-methods-test
-  "Tests for initialization methods via the k-means entry point.
-
-   NOTE: As of the dependency upgrade to neanderthal 0.61.0 / tmd 8.011,
-   only :afk-mc initialization works end-to-end. The other init methods
-   (:k-means-++, :k-means-parallel, :k-mc-squared) have pre-existing bugs:
-   - :k-means-++ and :k-means-parallel pass a function where weighted-sample
-     expects a column name string
-   - :k-mc-squared produces wrong centroid count on small datasets
-   These are tracked as known issues to fix."
+  "Tests for all initialization methods via the k-means entry point."
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.java.io :as io]
             [clojure.data.csv :as csv]
@@ -33,32 +25,48 @@
        (finally
          (cleanup! base#)))))
 
-;; Larger dataset for initialization methods to have enough to work with.
 ;; Three clear clusters with 10 points each.
 (def init-test-data
   (into [["a" "b"]]
         (concat
-         ;; Cluster near (0,0)
          (for [_ (range 10)] [(+ (rand-int 5)) (+ (rand-int 5))])
-         ;; Cluster near (100,100)
          (for [_ (range 10)] [(+ 98 (rand-int 5)) (+ 98 (rand-int 5))])
-         ;; Cluster near (200,200)
          (for [_ (range 10)] [(+ 198 (rand-int 5)) (+ 198 (rand-int 5))]))))
 
-;; AFK-MC (default and only working init) — thorough testing
+(def all-init-keys [:afk-mc :k-means-++ :k-mc-squared :k-means-parallel])
 
-(deftest test-init-afk-mc-produces-k-centroids
-  (with-test-csv "test.init.afk.csv" init-test-data
-    (let [result (k-means "test.init.afk.csv" 3
-                          :distance-key :euclidean
-                          :init :afk-mc
-                          :m 50)]
-      (is (= 3 (count (ds/rowvecs (:centroids result))))
-          ":afk-mc produces k centroids")
-      (is (number? (:cost result)))
-      (is (>= (:cost result) 0.0)))))
+;; Every init method produces k centroids
 
-(deftest test-init-afk-mc-with-different-k
+(deftest test-all-inits-produce-k-centroids
+  (doseq [init-key all-init-keys]
+    (let [fname (str "test.init." (name init-key) ".csv")]
+      (with-test-csv fname init-test-data
+        (let [result (k-means fname 3
+                              :distance-key :euclidean
+                              :init init-key
+                              :m 10)]
+          (testing (str init-key " produces 3 centroids")
+            (is (= 3 (count (ds/rowvecs (:centroids result))))))
+          (testing (str init-key " has non-negative cost")
+            (is (>= (:cost result) 0.0))))))))
+
+;; Every init method produces distinct centroids
+
+(deftest test-all-inits-produce-distinct-centroids
+  (doseq [init-key all-init-keys]
+    (let [fname (str "test.init.dist." (name init-key) ".csv")]
+      (with-test-csv fname init-test-data
+        (let [result (k-means fname 3
+                              :distance-key :euclidean
+                              :init init-key
+                              :m 10)
+              centroids (ds/rowvecs (:centroids result))]
+          (testing (str init-key " produces distinct centroids")
+            (is (= 3 (count (set centroids))))))))))
+
+;; AFK-MC with varying k
+
+(deftest test-afk-mc-with-different-k
   (doseq [k [1 2 3 5]]
     (with-test-csv (str "test.init.afk.k" k ".csv") init-test-data
       (let [result (k-means (str "test.init.afk.k" k ".csv") k
@@ -68,7 +76,9 @@
         (testing (str ":afk-mc with k=" k)
           (is (= k (count (ds/rowvecs (:centroids result))))))))))
 
-(deftest test-init-afk-mc-with-different-distances
+;; AFK-MC with different distance functions
+
+(deftest test-afk-mc-with-different-distances
   (doseq [dk [:euclidean :manhattan :chebyshev :euclidean-sq :emd]]
     (with-test-csv (str "test.init.afk." (name dk) ".csv") init-test-data
       (let [result (k-means (str "test.init.afk." (name dk) ".csv") 3
@@ -79,19 +89,11 @@
           (is (= 3 (count (ds/rowvecs (:centroids result)))))
           (is (>= (:cost result) 0.0)))))))
 
-(deftest test-init-afk-mc-distinct-centroids
-  (with-test-csv "test.init.afk.distinct.csv" init-test-data
-    (let [result (k-means "test.init.afk.distinct.csv" 3
-                          :distance-key :euclidean
-                          :init :afk-mc
-                          :m 50)
-          centroids (ds/rowvecs (:centroids result))]
-      (is (= 3 (count (set centroids)))
-          "All centroids should be unique"))))
+;; Multiple runs via k-means-seq
 
-(deftest test-init-afk-mc-multiple-runs-via-seq
-  (with-test-csv "test.init.afk.seq.csv" init-test-data
-    (let [results (take 3 (k-means-seq "test.init.afk.seq.csv" 3
+(deftest test-multiple-runs-via-seq
+  (with-test-csv "test.init.seq.csv" init-test-data
+    (let [results (take 3 (k-means-seq "test.init.seq.csv" 3
                                         :distance-key :euclidean
                                         :init :afk-mc
                                         :m 50))]
@@ -103,9 +105,11 @@
         (let [best (apply min-key :cost results)]
           (is (every? #(>= (:cost %) (:cost best)) results)))))))
 
-(deftest test-init-afk-mc-configuration-preserved
-  (with-test-csv "test.init.afk.conf.csv" init-test-data
-    (let [result (k-means "test.init.afk.conf.csv" 3
+;; Configuration preserved through init
+
+(deftest test-configuration-preserved
+  (with-test-csv "test.init.conf.csv" init-test-data
+    (let [result (k-means "test.init.conf.csv" 3
                           :distance-key :euclidean
                           :init :afk-mc
                           :m 50)

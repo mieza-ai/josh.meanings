@@ -16,7 +16,8 @@
    [taoensso.timbre :as log]
    [mieza.meanings.persistence :as p]
    [mieza.meanings.initializations.utils :refer [centroids->dataset uniform-sample add-default-chain-length]]
-   [clojure.spec.alpha :as s])
+   [clojure.spec.alpha :as s]
+   [tech.v3.dataset :as ds])
   (:use
    [mieza.meanings.initializations.core]))
 
@@ -86,7 +87,7 @@
 (defn- k-means-mc-2-initialization
   [conf]
   {:pre [(contains? conf :m) (contains? conf :k) (contains? conf :distance-fn)]
-   :post [(= (:k conf) (count %))]}
+   :post [(= (:k conf) (ds/row-count %))]}
   (log/info "Performing k-mc^2 initialization")
   (centroids->dataset
    conf
