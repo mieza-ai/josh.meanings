@@ -108,12 +108,17 @@
       (assignments config dataset-seq))))
 
 
-(s/fdef calculate-objective :args (s/cat :s :mieza.meanings.specs/configuration) :ret number?)
+(s/fdef calculate-objective :args (s/cat :s :mieza.meanings.specs/configuration
+                                         :centroids :mieza.meanings.specs/dataset) :ret number?)
 (defn calculate-objective
-  [^KMeansState conf]
-  (let [centroid-ds (.load-centroids conf)
+  "Computes the total cost: sum of minimum distances from each point to its nearest centroid."
+  [^KMeansState conf centroid-ds]
+  (let [col-names (:col-names conf)
+        centroid-ds (if (contains? (set (ds/column-names centroid-ds)) :assignments)
+                      (ds/select-columns centroid-ds col-names)
+                      centroid-ds)
         calculate-cost (fn [ds] (ne/sum (distances/minimum-distance conf ds centroid-ds)))]
-    (reduce + 0 (hfln/map calculate-cost (.load-points conf)))))
+    (reduce + 0.0 (hfln/map calculate-cost (persist/read-dataset-seq conf :points)))))
 
 
 (defn stabilized?
@@ -144,27 +149,33 @@
                            :initial-centroids :mieza.meanings.specs/dataset))
 (defn lloyd ^ClusterResult [^KMeansState conf initial-centroids]
   (let [column-names (:col-names conf)
-        progress (atom 0)
-        progress-bar (pr/progress-bar (get conf :iterations 100))]
+        max-iterations (get conf :iterations 100)
+        progress-bar (pr/progress-bar max-iterations)]
     (println "Performing lloyd iteration...")
     (let [final-centroids
-          (loop [centroids initial-centroids]
-            (if (< @progress 100)
+          (loop [centroids initial-centroids
+                 iteration 0]
+            (if (< iteration max-iterations)
               (do
-                (pr/print (pr/tick progress-bar @progress))
-                (swap! progress inc)
-                (recur
-                 (update-centroids centroids
-                                   (distances/with-centroids centroids
-                                     (dsr/group-by-column-agg
-                                      :assignments
-                                      (zipmap column-names (map dsr/mean column-names))
-                                      (assignments conf (persist/read-dataset-seq conf :points)))))))
-              centroids))]
-      (pr/print (pr/done (pr/tick progress-bar @progress)))
+                (pr/print (pr/tick progress-bar iteration))
+                (let [new-centroids
+                      (update-centroids centroids
+                                        (distances/with-centroids centroids
+                                          (dsr/group-by-column-agg
+                                           :assignments
+                                           (zipmap column-names (map dsr/mean column-names))
+                                           (assignments conf (persist/read-dataset-seq conf :points)))))]
+                  (if (stabilized? centroids new-centroids)
+                    (do
+                      (pr/print (pr/done (pr/tick progress-bar max-iterations)))
+                      new-centroids)
+                    (recur new-centroids (inc iteration)))))
+              (do
+                (pr/print (pr/done (pr/tick progress-bar iteration)))
+                centroids)))]
       (map->ClusterResult
        {:centroids final-centroids
-        :cost 0
+        :cost (calculate-objective conf final-centroids)
         :configuration (.configuration conf)}))))
 
 
