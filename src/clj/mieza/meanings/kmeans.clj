@@ -71,17 +71,18 @@
   (let [{:keys [format init distance-key m]} (merge default-options options)
         points-file (persist/convert-file points-file format)
         col-names (get options :columns (column-names points-file))]
-    (->KMeansState
-     k
-     points-file
-     format
-     init
-     distance-key
-     m
-     k-means
-     (estimate-size points-file)
-     col-names
-     true)))
+    (assoc (->KMeansState
+            k
+            points-file
+            format
+            init
+            distance-key
+            m
+            k-means
+            (estimate-size points-file)
+            col-names
+            true)
+           :distance-fn (distances/get-distance-fn distance-key))))
 
 
 (defn assignments-api
@@ -164,7 +165,7 @@
       (map->ClusterResult
        {:centroids final-centroids
         :cost 0
-        :configuration conf}))))
+        :configuration (.configuration conf)}))))
 
 
 (defn k-means-via-file

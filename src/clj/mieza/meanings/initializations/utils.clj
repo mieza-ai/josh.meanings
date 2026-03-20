@@ -46,7 +46,7 @@
   [^KMeansState s results]
   {:pre [(= (count results) (:k s))]
    :post [(= (count results) (ds/row-count %))]}
-  (vector->dataset results (.column-names s)))
+  (vector->dataset results (:col-names s)))
 
 
 (defn uniform-sample
