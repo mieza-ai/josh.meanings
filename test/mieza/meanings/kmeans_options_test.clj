@@ -79,10 +79,17 @@
 
 ;; --- LazySeq input ---
 
-;; NOTE: Lazy seq input currently broken — the LazySeq multimethod writes
-;; to a temp arrow file, but tmd 8.x changed the arrow writer path.
-;; This is a known issue to fix as part of the tmd 8.x migration.
-;; (deftest test-lazy-seq-input ...)
+(deftest test-lazy-seq-input
+  (let [lazy-data (lazy-seq
+                   [(ds/->dataset {"a" (double-array (range 20))
+                                   "b" (double-array (map #(* % 2.0) (range 20)))})])
+        result (k-means lazy-data 2
+                        :distance-key :euclidean
+                        :init :afk-mc
+                        :m 50)]
+    (testing "k-means accepts lazy seq input"
+      (is (= 2 (count (ds/rowvecs (:centroids result)))))
+      (is (number? (:cost result))))))
 
 ;; --- Distance function combinations ---
 

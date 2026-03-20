@@ -219,7 +219,7 @@
   (let [format (or (:format options) default-format)
         suffix (:suffix (format persist/formats))
         filename (str (java.util.UUID/randomUUID) suffix)]
-    (ds/write! (ds/->dataset lazy-seq) filename)
+    (persist/write-datasets filename lazy-seq)
     (apply k-means filename k options)))
 
 
