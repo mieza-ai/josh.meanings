@@ -3,16 +3,14 @@
   :url "https://github.com/tacktechai/mieza.meanings"
   :license {:name "The MIT License"
             :url "https://opensource.org/licenses/MIT"}
-  :dependencies [[org.clojure/clojure "1.11.3"]
+  :dependencies [[org.clojure/clojure "1.12.4"]
                  [org.clojure/data.csv "1.0.1"]
                  [babashka/fs "0.4.18"]
 
-                 [techascent/tech.ml.dataset "7.030"]
+                 [techascent/tech.ml.dataset "8.011"]
                  [generateme/fastmath "2.4.0"]
-                 [uncomplicate/neanderthal "0.49.1"]
-                 [org.bytedeco/mkl "2024.0-1.5.10" :classifier linux-x86_64-redist]
-                 [org.bytedeco/cuda "12.3-8.9-1.5.10" :classifier linux-x86_64-redist]
-                 [cnuernber/dtype-next "10.113"]
+                 [uncomplicate/neanderthal "0.61.0"]
+                 [cnuernber/dtype-next "11.013"]
                  ;; Arrow support 
                  [org.apache.arrow/arrow-vector "6.0.0"
                   :exclusions [commons-codec/commons-codec
@@ -54,7 +52,7 @@
              {:jvm-opts ["-Djdk.attach.allowAttachSelf"
                          "-XX:+TieredCompilation"
                          "-Xss20m"
-                         "--add-modules" "jdk.incubator.foreign,jdk.incubator.vector"
+                         "--add-modules" "jdk.incubator.vector"
                          "--enable-native-access=ALL-UNNAMED"
                          "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED"
                          "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]
