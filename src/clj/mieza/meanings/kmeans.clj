@@ -198,18 +198,27 @@
 ;; transform into a dataset. We handle the transformation step via 
 ;; multimethods which dispatch based on the datasets type.
 (defmulti k-means
-  "Runs k means clustering on a dataset.
-	 
-	 (k-means ds 5 options)
+  "Runs Lloyd's algorithm to produce a `ClusterResult` record (see `mieza.meanings.records.cluster-result`).
 
-	 Options:
+  **Arguments**
 
-		 - :format 
-		 - :init
-			 - :chain-length
-		 - :distance-key 
-		 - columns
-	 "
+  - `dataset` — `String` path to on-disk data, or a `clojure.lang.LazySeq` of datasets
+    (written to a temporary file using `:format`).
+  - `k` — number of clusters (positive integer).
+  - `options` — optional keyword seq merged into `default-options`:
+
+    | Key | Meaning |
+    |-----|---------|
+    | `:format` | Working-file format: `:arrow` (default), `:arrows`, `:parquet`, `:csv` |
+    | `:init` | Initialization: `:afk-mc`, `:k-means-++`, `:k-means-parallel`, `:k-mc-squared`, `:naive` |
+    | `:distance-key` | Distance: see `mieza.meanings.distances/distance-keys` ; default `:emd` |
+    | `:m` | Chain length for sampling-based inits (see `default-chain-length`) |
+    | `:columns` | Feature column names; default: all columns except assignment helpers |
+    | `:iterations` | Max Lloyd iterations (default 100) |
+
+  **Returns** a record with `:centroids`, `:cost`, and `:configuration`.
+
+  Example: `(k-means \\\"data.parquet\\\" 10 :distance-key :euclidean)`"
   (fn [dataset _ & _] (class dataset)))
 
 
@@ -235,6 +244,7 @@
 
 
 (defn k-means-seq
-  "Returns a lazy sequence of m ClusterResult."
+  "Returns an infinite lazy sequence of independent `k-means` runs for the same
+  `dataset` and `k`. Use `take` + `(apply min-key :cost ...)` to keep the best objective."
   [dataset k & options]
   (repeatedly #(apply k-means dataset k options)))

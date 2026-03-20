@@ -12,10 +12,15 @@ releases might only add additional tests and/or documentation updates rather tha
 
 - GitHub issue and PR templates, `CODEOWNERS`, `AGENTS.md`, `llms.txt`, and `llms-full.txt`.
 - cljdoc sidebar config (`doc/cljdoc.edn`) and `:scm` metadata in `project.clj` for published docs.
+- GitHub Actions CI workflow (`ci.yml`) and Dependabot updates for GitHub Actions.
+- Local API doc generation via `lein-codox` (`lein codox`).
+- `:test` JVM profile flags (incubator vector, native access) aligned with dev for CI/local tests.
 
 ### Changed
 
-- README quick start now matches the current `ClusterResult` / `save-model` / `load-model` / `assignments` API; added cljdoc and MIT badges.
+- README quick start now matches the current `ClusterResult` / `save-model` / `load-model` / `assignments` API; added CI, cljdoc, and MIT badges.
+- Docstrings expanded for `k-means`, `k-means-seq`, and the `Classifier` / `Savable` protocols.
+- `CONTRIBUTING` describes GitHub Actions; ignore stray `*.nippy` test artifacts.
 - `doc/intro.md`: documented that the default `:format` is `:arrow` (per `kmeans` defaults).
 - Rebranded from `josh.meanings` to `mieza.meanings` under [mieza.ai](https://mieza.ai) stewardship.
 - Artifact coordinates changed from `org.clojars.joshua/josh.meanings` to `ai.mieza/mieza.meanings`.

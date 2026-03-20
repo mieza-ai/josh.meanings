@@ -16,10 +16,13 @@ how fast this project is relative to peer projects.
 
 # Testing
 
-We're using `lein` to run tests. So to run tests locally you can use the command `lein test`. When you open a pull
-request tests should be run automatically in CI. An important thing to realize about testing is that this project is
-intended to be a GPU-enabled project (via OpenCL) with support for CPU being a fallback. So without a GPU, some
-tests will be skipped.
+We're using `lein` to run tests. So to run tests locally you can use the command `lein test`.
+
+GitHub Actions (workflow `ci.yml`) runs `lein test` on every push and pull request to `main`
+(CPU-focused build on Ubuntu). Full OpenCL/GPU coverage may still be run on maintainer
+hardware or self-hosted runners as described in project planning docs.
+
+Without a suitable GPU/OpenCL stack, some tests may skip or exercise CPU paths only.
 
 When opening a GitHub Pull Request please be sure to include a clear list of what you've done as well as a
 reference to the issue you're working on. We hope for changes to functionality to include an expansion of test coverage.

@@ -47,10 +47,21 @@
                  [org.apache.hadoop/hadoop-mapreduce-client-core  "3.3.0"
                   :exclusions [org.slf4j/slf4j-log4j12]]
                  [org.clojars.joshua/sampling "3.3"]]
-  :plugins [[org.clojars.joshua/josh.benchmarking "0.0.4"]]
+  :plugins [[org.clojars.joshua/josh.benchmarking "0.0.4"]
+            [lein-codox "0.10.8"]]
+  :codox {:source-paths ["src/clj"]
+          :output-path "target/docs"
+          :source-uri "https://github.com/tacktechai/mieza.meanings/blob/main/{filepath}#L{line}"
+          :metadata {:doc/format :markdown}}
   :repl-options {:init-ns mieza.meanings.kmeans}
   :source-paths ["src/clj" "src/kernels"]
-  :profiles {:dev
+  :profiles {:test
+             {:jvm-opts ["-Xss20m"
+                         "--add-modules" "jdk.incubator.vector"
+                         "--enable-native-access=ALL-UNNAMED"
+                         "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED"
+                         "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]}
+             :dev
              {:jvm-opts ["-Djdk.attach.allowAttachSelf"
                          "-XX:+TieredCompilation"
                          "-Xss20m"

@@ -12,7 +12,7 @@ mieza.meanings is a **GPU-accelerated k-means** library for Clojure, aimed at **
 
 ## Build and run
 
-- **Primary**: Leiningen — `lein test`, `lein repl` (init ns: `mieza.meanings.kmeans`).
+- **Primary**: Leiningen — `lein test`, `lein repl` (init ns: `mieza.meanings.kmeans`), `lein codox` for local HTML API docs.
 - **Also supported**: Clojure CLI — `deps.edn` mirrors dependencies; use your usual `clojure -M:dev` / `-X` patterns as you wire aliases locally.
 - **JVM**: The `:dev` profile in `project.clj` sets incubator modules, native access, and stack size — keep similar flags when running tests or profiling outside Lein.
 

@@ -19,6 +19,7 @@ pom.xml.asc
 *.arrows
 *.log
 *.parquet
+*.nippy
 decompiled*
 dec*
 .clj-kondo/.cache

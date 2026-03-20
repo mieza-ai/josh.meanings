@@ -1,5 +1,6 @@
 # mieza.meanings
 
+[![CI](https://github.com/tacktechai/mieza.meanings/actions/workflows/ci.yml/badge.svg)](https://github.com/tacktechai/mieza.meanings/actions/workflows/ci.yml)
 [![Clojars Project](https://img.shields.io/clojars/v/ai.mieza/mieza.meanings.svg)](https://clojars.org/ai.mieza/mieza.meanings)
 [![cljdoc](https://cljdoc.org/badge/ai.mieza/mieza.meanings)](https://cljdoc.org/d/ai.mieza/mieza.meanings)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
