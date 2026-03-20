@@ -1,43 +1,41 @@
-# josh.meanings
+# mieza.meanings
 
-[![CircleCI](https://circleci.com/gh/jColeChanged/josh.meanings.svg?style=svg)](https://circleci.com/gh/jColeChanged/josh.meanings.svg?style=svg)
+GPU-accelerated K-Means clustering for Clojure. Built to handle "medium data" workloads —
+datasets too large to fit in memory, but not so large that the computation cannot be
+persisted to disk.
 
-This is a program for computing k-means in Clojure.  It is built to handle workloads which are medium data, 
-which means they involve datasets which are too large to fit in memory, but not so large that the computation 
-cannot be persisted to disk.
-
-Unlike most other K-means implementations we employ several techniques which lend themselves toward making this 
-K-means implementation quite a bit faster than other implementations.
+Unlike most other K-means implementations, we employ several techniques which lend
+themselves toward making this implementation quite a bit faster than alternatives:
 
 1. We leverage memory mapping of the datasets.
-2. We do our distance calculations on the GPU.
+2. We do our distance calculations on the GPU via OpenCL.
 3. We implement initialization schemes from more recent research.
 
 > [!NOTE]
 > GPU acceleration is available for several distance functions including EMD,
 > Euclidean, Manhattan, Chebyshev and Euclidean squared.
 
-# Installation
+## Installation
 
-[![Clojars Project](https://img.shields.io/clojars/v/org.clojars.joshua/josh.meanings.svg)](https://clojars.org/org.clojars.joshua/josh.meanings)
+[![Clojars Project](https://img.shields.io/clojars/v/ai.mieza/mieza.meanings.svg)](https://clojars.org/ai.mieza/mieza.meanings)
 
 If you use the Clojure CLI, add the library to your `deps.edn`:
 
 ```clojure
-org.clojars.joshua/josh.meanings {:mvn/version "3.0.14"}
+ai.mieza/mieza.meanings {:mvn/version "3.0.14"}
 ```
 
 ## Getting Started
 
-```
-(require '[josh.meanings.kmeans :refer [k-means k-means-seq]]
-         '[josh.meanings.protocols.savable :refer [save-model]]
-         '[josh.meanings.protocols.classifier :refer [classify load-centroids load-assignments]])
+```clojure
+(require '[mieza.meanings.kmeans :refer [k-means k-means-seq]]
+         '[mieza.meanings.protocols.savable :refer [save-model]]
+         '[mieza.meanings.protocols.classifier :refer [classify load-centroids load-assignments]])
 
 
-;; Get a dataset.  You can pass in your dataset under a variety of formats. 
+;; Get a dataset.  You can pass in your dataset under a variety of formats.
 ;; See the docs for more details on supported formats.
-(def dataset "your_dataset.csv")  
+(def dataset "your_dataset.csv")
 
 ;; Choose the number of clusters you want
 (def k 10)
@@ -46,9 +44,9 @@ org.clojars.joshua/josh.meanings {:mvn/version "3.0.14"}
 ;; To get a single cluster model
 (def model (k-means dataset k))
 
-;; Alternatively you can run k means multiple times.  This is recommended because 
-;; some k means initializations don't give guarantees on the quality of a solution 
-;; and so you can get better results by running k means multiple times and taking 
+;; Alternatively you can run k means multiple times.  This is recommended because
+;; some k means initializations don't give guarantees on the quality of a solution
+;; and so you can get better results by running k means multiple times and taking
 ;; the best result.
 (def model (apply min-key :cost (take k-tries (k-means-seq cluster-dataset-name k))))
 
@@ -76,7 +74,12 @@ Run the project's unit tests with:
 lein test
 ```
 
-Tests exercising the GPU code paths require an Nvidia GPU with CUDA support.
+Tests exercising the GPU code paths require a GPU with OpenCL support.
+
+## History
+
+This project was originally created as `josh.meanings` by Joshua Cole.
+It is now maintained by [mieza.ai](https://mieza.ai).
 
 ## License
 

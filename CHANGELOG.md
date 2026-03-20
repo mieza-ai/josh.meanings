@@ -6,6 +6,16 @@ For releases before version [1.0.0] this project *did not* follow [semver](https
 For releases after version 1.0.0 this project *will* follow semver, with the addition that minor
 releases might only add additional tests and/or documentation updates rather than bug fixes.
 
+## [Unreleased]
+
+### Changed
+
+- Rebranded from `josh.meanings` to `mieza.meanings` under [mieza.ai](https://mieza.ai) stewardship.
+- Artifact coordinates changed from `org.clojars.joshua/josh.meanings` to `ai.mieza/mieza.meanings`.
+- All namespaces renamed from `josh.meanings.*` to `mieza.meanings.*`.
+- Updated project URL to `https://github.com/tacktechai/mieza.meanings`.
+- Updated copyright to include mieza.ai (original copyright by Joshua Cole retained).
+
 ## [13.0.6] - 2025-05-21
 
 ### Added

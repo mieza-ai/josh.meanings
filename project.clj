@@ -1,6 +1,6 @@
-(defproject org.clojars.joshua/josh.meanings (or (System/getenv "PROJECT_VERSION") "3.0.14")
-  :description "Clojure implementation of larger than memory K-Means clustering."
-  :url "https://github.com/jcolechanged/josh.meanings"
+(defproject ai.mieza/mieza.meanings (or (System/getenv "PROJECT_VERSION") "3.0.14")
+  :description "GPU-accelerated K-Means clustering for Clojure. Handles larger-than-memory datasets."
+  :url "https://github.com/tacktechai/mieza.meanings"
   :license {:name "The MIT License"
             :url "https://opensource.org/licenses/MIT"}
   :dependencies [[org.clojure/clojure "1.11.3"]
@@ -48,7 +48,7 @@
                   :exclusions [org.slf4j/slf4j-log4j12]]
                  [org.clojars.joshua/sampling "3.3"]]
   :plugins [[org.clojars.joshua/josh.benchmarking "0.0.4"]]
-  :repl-options {:init-ns josh.meanings.kmeans}
+  :repl-options {:init-ns mieza.meanings.kmeans}
   :source-paths ["src/clj" "src/kernels"]
   :profiles {:dev
              {:jvm-opts ["-Djdk.attach.allowAttachSelf"

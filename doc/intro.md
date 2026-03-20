@@ -1,4 +1,4 @@
-# josh.meanings
+# mieza.meanings
 
 ## Initialization
 
@@ -90,7 +90,7 @@ an improvement goes below some threshold.
 ## Example Usage
 
 ```
-(k-means "/home/joshua/Projects/fast.parquet" 200 :columns ["f1" "f2" "f3"])
+(k-means "path/to/dataset.parquet" 200 :columns ["f1" "f2" "f3"])
 ```
 
 ## Testing
