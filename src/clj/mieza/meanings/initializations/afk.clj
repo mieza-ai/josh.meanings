@@ -94,51 +94,25 @@
   :ret :mieza.meanings.specs/datasets)
 (defn- q-of-x
   "Computes the q(x) distribution for all x in the dataset on the GPU.
-
-   Captures the current gpu-context value once at construction time
-   and closes over it for every per-element call. The previous version
-   re-derefed `@distances/gpu-context` inside the lazy mapper, which
-   is non-reentrant under two distinct hazards:
-
-   1. Lazy-seq escape: `(hfln/map fn (read-dataset-seq …))` returns
-      a lazy seq. If the seq is realized after `with-gpu-context`'s
-      `finally` runs `teardown-device` (which nils the global atom),
-      the inner deref returns `nil` and `gpu-distance` blows up with
-      `OpenCL error: CL_INVALID_CONTEXT`. This can happen even within
-      a single compress invocation because tech.v3.libs.arrow's
-      `dataset-seq->stream!` consumes the seq via ForkJoinPool
-      workers that may outlive the body's main-thread frame.
-
-   2. Concurrent invocations: the `gpu-context` atom is global, not
-      per-call. If two compress jobs run in parallel, the inner
-      one's `teardown-device` nils the atom out from under the outer
-      one. Closing over a captured snapshot makes each q-of-x call
-      hold its own reference and be immune to other invocations'
-      teardowns.
-
-   Capturing once is correct because `with-gpu-context` only
-   reset!s the atom on entry; it never mutates it mid-body. The
-   cluster-buffer mutations (`with-centroids-buffer!`) update OTHER
-   keys on the same map, not :ctx, so the snapshot remains valid
-   for the duration of the q-of-x distance calls."
+   Implements Bachem et al. 2016 (NeurIPS) Eq. 4:
+     q(x|c1) = (1/2) * d(x,c1)^2 / sum_x' d(x',c1)^2 + 1/(2n)
+   The denominator passed in is sum_x' d(x',c1)^2 (computed in qx-denominator)."
   ([conf cluster denominator]
    (let [regularizer (qx-regularizer conf)
          cluster-matrix (distances/dataset->matrix conf cluster)
-         ;; Snapshot the gpu-context once. The lazy mapper below
-         ;; closes over `gpu-ctx` instead of dereffing the global
-         ;; atom — see the docstring above for why.
-         gpu-ctx @distances/gpu-context
          qx (fn [matrix]
-              (let [vector (fv (seq matrix))]
+              ;; matrix is the raw distance vector d(x, c1) returned by gpu-distance.
+              ;; Square it, then compute (1/2) * d^2 / denominator + regularizer.
+              (let [d2 (vm/pow (fv (seq matrix)) 2)]
                 (axpy
-                 (/ 1.0 denominator)
-                 vector
+                 (/ 0.5 denominator)
+                 d2
                  (entry! (fv (seq matrix)) regularizer))))]
      (hfln/map (fn [ds]
                  (assoc ds :qx
                         (->
                          (distances/gpu-distance
-                          gpu-ctx (distances/dataset->matrix conf ds) cluster-matrix)
+                          @distances/gpu-context (distances/dataset->matrix conf ds) cluster-matrix)
                          (qx))))
                (p/read-dataset-seq conf :points)))))
 
@@ -160,21 +134,27 @@
                :clusters :mieza.meanings.specs/dataset)
   :ret :mieza.meanings.specs/dataset)
 (defn mcmc-sample
-  "Perform markov chain monte carlo sampling to approximate D^2 sampling"
+  "Perform markov chain monte carlo sampling to approximate D^2 sampling.
+   Implements Bachem et al. 2016 Algorithm 1 line 11. The MH acceptance ratio
+   for AFK-MC^2 with proposal q(x) targeting p(x|C) ∝ d(x,C)^2 is:
+       α = min( (d^2(y,C) · q(x)) / (d^2(x,C) · q(y)), 1 )
+   Precompute w(i) = d^2(i,C) / q(i) so the ratio becomes w(y)/w(x)."
   [conf points clusters]
   (let [min-dists (distances/minimum-distance conf points clusters)
-        dxqx      (vm/mul min-dists (fv (get points qx-column-name)))
+        d2        (vm/pow min-dists 2)
+        qx-vec    (fv (get points qx-column-name))
+        w         (vm/div d2 qx-vec)
         rands     (ne/view-vctr (utils/generate-random-buffer points))
         cluster-index (reduce
                        (fn [^long acc-index ^long index]
-                         (let [acc   (ne/entry dxqx acc-index)
-                               dyqy  (ne/entry dxqx index)
-                               rand  (ne/entry rands index)]
-                           (if (or (zero? acc) (> (/ dyqy acc) rand))
+                         (let [acc  (ne/entry w acc-index)
+                               wy   (ne/entry w index)
+                               rand (ne/entry rands index)]
+                           (if (or (zero? acc) (> (/ wy acc) rand))
                              index
                              acc-index)))
                        0
-                       (range 0 (dim dxqx)))]
+                       (range 0 (dim w)))]
     (->  (ds/select-rows points cluster-index)
          (ds/select-columns (:col-names conf)))))
 

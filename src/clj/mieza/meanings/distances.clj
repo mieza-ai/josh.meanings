@@ -56,56 +56,9 @@
    [uncomplicate.neanderthal.core :refer [entry imin mrows ncols rows]]
    [uncomplicate.neanderthal.native :refer [fge fv]]) 
   (:import
-   [java.nio ByteBuffer ByteOrder FloatBuffer]
    [org.bytedeco.javacpp FloatPointer]))
 
 (set! *warn-on-reflection* true)
-
-;; ---------------------------------------------------------------------------
-;; Buffer reading
-;; ---------------------------------------------------------------------------
-;;
-;; `(buffer some-neanderthal-matrix)` is polymorphic — depending on the
-;; underlying storage backend it can return either a JavaCPP `FloatPointer`
-;; (where `.capacity` is in floats and `.get(float[])` reads them directly)
-;; or a NIO `DirectByteBuffer` (where `.capacity` is in *bytes* and there
-;; is no `get(float[])` overload — you have to view it as a FloatBuffer
-;; first). The original GPU code paths assumed FloatPointer and broke at
-;; runtime against ByteBuffer with two compounding bugs:
-;;
-;;   1. (float-array (.capacity bb)) allocates 4× more floats than needed
-;;   2. (.get bb float-array) is `IllegalArgumentException: No matching
-;;      method get found taking 1 args for class java.nio.DirectByteBuffer`
-;;
-;; This helper handles both shapes correctly with explicit type hints
-;; (so no reflection) and is the only call site for `(buffer ...)` in
-;; the GPU compute paths below.
-
-(defn ^"[F" read-buffer-as-float-array
-  "Read all floats out of the underlying neanderthal block buffer of a
-   matrix into a fresh `float[]`. Handles both `FloatPointer` (JavaCPP)
-   and `DirectByteBuffer` (NIO direct) storage."
-  [b]
-  (cond
-    (instance? FloatPointer b)
-    (let [^FloatPointer fp b
-          n (.capacity fp)
-          arr (float-array n)]
-      (.get fp arr)
-      arr)
-
-    (instance? ByteBuffer b)
-    (let [^ByteBuffer bb b
-          ;; Native byte order matches what neanderthal / OpenCL produce.
-          ^FloatBuffer fb (.asFloatBuffer (.order bb (ByteOrder/nativeOrder)))
-          n (.capacity fb)
-          arr (float-array n)]
-      (.get fb arr)
-      arr)
-
-    :else
-    (throw (IllegalArgumentException.
-            (str "Unsupported neanderthal block buffer type: " (class b))))))
 
 ;; I don't want to lock people out of using their preferred distance 
 ;; functions. So I'm going to implement distance as a multimethod that 
@@ -161,6 +114,16 @@
    (dataset->dense ds :row :float32)))
 
 
+(defn matrix->float-array
+  "Extracts the raw float data from a Neanderthal matrix as a Java float array.
+   Layout is row-major: [row0-col0, row0-col1, ..., row1-col0, ...]."
+  ^floats [matrix]
+  (let [ptr (buffer matrix)
+        arr (float-array (.capacity ^org.bytedeco.javacpp.FloatPointer ptr))]
+    (.get ^org.bytedeco.javacpp.FloatPointer ptr arr)
+    arr))
+
+
 ;; GPU based distance functions need to work a little differently.  For CPU 
 ;; functions we get the function and then we use the distance function during 
 ;; an inner-loop.  For GPU based distance functions we don't call the distance 
@@ -171,11 +134,16 @@
 ;; program and a kernel.  Telling whether GPU support is then as simple as checking 
 ;; for the presence of the relevant key.
 (def gpu-accelerated
-  {:emd          {:program "emd_multi.c" :kernel "wasserstein_distances"}
-   :euclidean    {:program "euclidean_multi.c" :kernel "euclidean_distances"}
-   :manhattan    {:program "manhattan_multi.c" :kernel "manhattan_distances"}
-   :chebyshev    {:program "chebyshev_multi.c" :kernel "chebyshev_distances"}
-   :euclidean-sq {:program "euclidean_sq_multi.c" :kernel "euclidean_sq_distances"}})
+  {:emd          {:program "emd_multi.c"          :kernel "wasserstein_distances"
+                  :fused-program "fused_emd_assign.c"          :fused-kernel "fused_emd_assign"}
+   :euclidean    {:program "euclidean_multi.c"    :kernel "euclidean_distances"
+                  :fused-program "fused_euclidean_assign.c"    :fused-kernel "fused_euclidean_assign"}
+   :manhattan    {:program "manhattan_multi.c"    :kernel "manhattan_distances"
+                  :fused-program "fused_manhattan_assign.c"    :fused-kernel "fused_manhattan_assign"}
+   :chebyshev    {:program "chebyshev_multi.c"    :kernel "chebyshev_distances"
+                  :fused-program "fused_chebyshev_assign.c"    :fused-kernel "fused_chebyshev_assign"}
+   :euclidean-sq {:program "euclidean_sq_multi.c" :kernel "euclidean_sq_distances"
+                  :fused-program "fused_euclidean_sq_assign.c" :fused-kernel "fused_euclidean_sq_assign"}})
 
 ;; We can tell whether we can use an outerloop GPU program instead of innerloop 
 ;; function calls by calling a predicate function.  This will allow for seemless 
@@ -229,6 +197,7 @@
    (let [ctx (context [dev])
          channel (chan)
          cqueue (command-queue ctx dev)
+         otype-str (when k (-> k size->bytes bytes->type))
          program-source (-> distance-configuration :program io/resource slurp)
          program (program-with-source ctx [program-source])
          prog (try
@@ -236,20 +205,35 @@
                 (catch Exception _
                   (println (build-log program dev))))
          min-program-source (slurp (io/resource "min_index.c"))
-         min-program (program-with-source ctx [min-program-source]) 
-         min-prog (try
-                    (build-program!
-                     min-program
-                     (str "-DOTYPE=" (-> k size->bytes bytes->type))
-                     channel)
-                    (catch Exception _
-                      (println (build-log min-program dev))))
+         min-program (program-with-source ctx [min-program-source])
+         min-prog (when otype-str
+                    (try
+                      (build-program!
+                       min-program
+                       (str "-DOTYPE=" otype-str)
+                       channel)
+                      (catch Exception _
+                        (println (build-log min-program dev)))))
          sum-program-source (slurp (io/resource "centroids.c"))
          sum-program (program-with-source ctx [sum-program-source])
          sum-prog (try
                     (build-program! sum-program (str "-DSIZE=" length) channel)
                     (catch Exception _
                       (println (build-log sum-program dev))))
+         ;; Fused distance+argmin kernel — compile alongside the two-pass kernels
+         fused-program-source (when otype-str
+                                (some-> distance-configuration :fused-program io/resource slurp))
+         fused-program (when fused-program-source
+                         (program-with-source ctx [fused-program-source]))
+         fused-prog (when fused-program
+                      (try
+                        (build-program! fused-program
+                                        (str "-DSIZE=" length " -DOTYPE=" otype-str)
+                                        channel)
+                        (catch Exception e
+                          (println "Failed to compile fused kernel:" (.getMessage e))
+                          (when fused-program (println (build-log fused-program dev)))
+                          nil)))
          gpu-context-map {:chan channel
                           :dev dev
                           :kernel  (-> distance-configuration :kernel)
@@ -260,9 +244,12 @@
                           :min-program min-program
                           :min-prog min-prog
                           :min-kernel "minimum_index"
-                          :sum-program sum-program 
+                          :sum-program sum-program
                           :sum-prog sum-prog
-                          :sum-kernel "sum_by_group"}]
+                          :sum-kernel "sum_by_group"
+                          :fused-program fused-program
+                          :fused-prog fused-prog
+                          :fused-kernel (-> distance-configuration :fused-kernel)}]
      (reset! gpu-context gpu-context-map)
      gpu-context-map)))
 
@@ -291,8 +278,11 @@
         ctx (:ctx @gpu-context)
         k (mrows centroids)
         cols (ncols centroids)
-        cl-centroids (cl-buffer ctx (* k cols Float/BYTES) :read-only)
-        centroids-array (read-buffer-as-float-array (buffer centroids))]
+        cl-centroids (cl-buffer ctx (* k cols Float/BYTES) :read-only) 
+        ^FloatPointer centroids-ptr (buffer centroids)
+        centroids-array (float-array (.capacity centroids-ptr))]
+
+    (.get centroids-ptr centroids-array)
 
     (enq-write! cqueue cl-centroids centroids-array)
 
@@ -323,7 +313,10 @@
   ([] (teardown-device @gpu-context))
   ([device-context]
    (doseq [k [:dev :ctx :cqueue :program :prog :min-program :min-prog :sum-program :sum-prog]]
-     (clojurecl/release (k device-context)))))
+     (clojurecl/release (k device-context)))
+   ;; Release fused kernel resources if they were compiled
+   (when-let [fp (:fused-program device-context)] (clojurecl/release fp))
+   (when-let [fp (:fused-prog device-context)] (clojurecl/release fp))))
 
 
 (defmacro with-gpu-context
@@ -371,8 +364,10 @@
          num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
          global-work-size [global-size]
          work-size (work-size global-work-size)
-         host-msg (direct-buffer (* num-distances Float/BYTES))
-         matrix-array (read-buffer-as-float-array (buffer matrix))
+         ^java.nio.ByteBuffer host-msg (direct-buffer (* num-distances Float/BYTES))
+         ^FloatPointer matrix-ptr (buffer matrix)
+         matrix-array (float-array (.capacity matrix-ptr))
+         _ (.get matrix-ptr matrix-array)
          cqueue (:cqueue device-context)
          cl-centroids (:cl-centroids device-context)]
      (with-release [cl-result (cl-buffer (:ctx device-context) (* num-distances Float/BYTES) :write-only)
@@ -383,14 +378,10 @@
        (enq-kernel! cqueue cl-kernel work-size)
        (enq-read! cqueue cl-result host-msg)
        (finish! cqueue)
-       ;; Bulk-read the GPU result into a float[]. The previous per-element
-       ;; (dotimes ... (aset res i (.get data))) loop hit `data` as Object,
-       ;; making each .get reflective; for num-distances on the order of
-       ;; n*num_clusters this dominated total runtime even though the GPU
-       ;; kernel itself was fast.
-       (let [^java.nio.FloatBuffer data (.asFloatBuffer ^java.nio.ByteBuffer host-msg)
+       (let [^java.nio.FloatBuffer data (.asFloatBuffer host-msg)
              res (float-array num-distances)]
-         (.get data res)
+         (dotimes [i num-distances]
+           (aset ^floats res i (float (.get data))))
          res))))
 
   ([device-context matrix centroids]
@@ -401,28 +392,28 @@
          num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
          global-work-size [global-size]
          work-size (work-size global-work-size)
-         host-msg (direct-buffer (* num-distances Float/BYTES))
-         matrix-array (read-buffer-as-float-array (buffer matrix))
-         centroids-array (read-buffer-as-float-array (buffer centroids))
+         ^java.nio.ByteBuffer host-msg (direct-buffer (* num-distances Float/BYTES))
+         ^FloatPointer matrix-ptr (buffer matrix)
+         ^FloatPointer centroids-ptr (buffer centroids)
+         matrix-array (float-array (.capacity matrix-ptr))
+         centroids-array (float-array (.capacity centroids-ptr))
+         _ (.get matrix-ptr matrix-array)
+         _ (.get centroids-ptr centroids-array)
          cqueue (:cqueue device-context)]
      (with-release [cl-result (cl-buffer (:ctx device-context) (* num-distances Float/BYTES) :write-only)
                     cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)
                     cl-centroids (cl-buffer (:ctx device-context) (* num-clusters (ncols centroids) Float/BYTES) :read-only)
                     cl-kernel (kernel (:prog device-context) (:kernel device-context))]
        (set-args! cl-kernel cl-result cl-matrix cl-centroids (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
-       (enq-write! cqueue cl-matrix matrix-array) 
-       (enq-write! cqueue cl-centroids centroids-array) 
+       (enq-write! cqueue cl-matrix matrix-array)
+       (enq-write! cqueue cl-centroids centroids-array)
        (enq-kernel! cqueue cl-kernel work-size)
        (enq-read! cqueue cl-result host-msg)
        (finish! cqueue)
-       ;; Bulk-read the GPU result into a float[]. The previous per-element
-       ;; (dotimes ... (aset res i (.get data))) loop hit `data` as Object,
-       ;; making each .get reflective; for num-distances on the order of
-       ;; n*num_clusters this dominated total runtime even though the GPU
-       ;; kernel itself was fast.
-       (let [^java.nio.FloatBuffer data (.asFloatBuffer ^java.nio.ByteBuffer host-msg)
+       (let [^java.nio.FloatBuffer data (.asFloatBuffer host-msg)
              res (float-array num-distances)]
-         (.get data res)
+         (dotimes [i num-distances]
+           (aset ^floats res i (float (.get data))))
          res)))))
 
 
@@ -434,7 +425,7 @@
 
 (defn create-min-index-result-array
   [cluster-count num-rows]
-  (let [array-type (case (size->bytes cluster-count)
+  (let [array-type (case (int (size->bytes cluster-count))
                      1
                      byte-array
                      2
@@ -454,7 +445,9 @@
          num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
          global-work-size [global-size]
          work-size (work-size global-work-size)
-         matrix-array (read-buffer-as-float-array (buffer matrix))
+         ^FloatPointer matrix-ptr (buffer matrix)
+         matrix-array (float-array (.capacity matrix-ptr))
+         _ (.get matrix-ptr matrix-array)
          min-indices (create-min-index-result-array num-clusters n)
          cqueue (:cqueue device-context)
          cl-centroids (:cl-centroids device-context)]
@@ -464,7 +457,7 @@
        (with-release [cl-kernel (kernel (:prog device-context) (:kernel device-context))]
          (set-args! cl-kernel cl-result cl-matrix cl-centroids
                     (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
-         (enq-write! cqueue cl-matrix matrix-array) 
+         (enq-write! cqueue cl-matrix matrix-array)
          (enq-kernel! cqueue cl-kernel work-size)
          (finish! cqueue))
 
@@ -485,7 +478,9 @@
          num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
          global-work-size [global-size]
          work-size (work-size global-work-size)
-         matrix-array (read-buffer-as-float-array (buffer matrix))
+         ^FloatPointer matrix-ptr (buffer matrix)
+         matrix-array (float-array (.capacity matrix-ptr))
+         _ (.get matrix-ptr matrix-array)
          cqueue (:cqueue device-context)
          min-indices (create-min-index-result-array num-clusters n)
          cl-centroids (:cl-centroids device-context)]
@@ -507,9 +502,49 @@
 
 
 
-;; The GPU is so much faster than the CPU that we should be preferring 
-;; the way it approaches things to the way that the CPU might break down 
-;; the problem.  So our CPU outerloop returns arrays of floats just like 
+;; Fused distance+argmin kernel — computes assignments in a single pass
+;; without materializing the N*K distance matrix in global memory.
+;; This is the key optimization from the Flash-KMeans paper (arXiv:2603.09229):
+;; each work-item streams through all centroids while maintaining a running
+;; minimum in registers, writing only the final assignment index.
+(defn gpu-fused-assign
+  "Computes distance + argmin in a single kernel, returning assignment indices.
+   Eliminates the intermediate N*K distance matrix entirely."
+  [device-context matrix]
+  (let [num-clusters (:k device-context)
+        n (mrows matrix)
+        global-size 1024
+        num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
+        global-work-size [global-size]
+        work-size (work-size global-work-size)
+        ^FloatPointer matrix-ptr (buffer matrix)
+        matrix-array (float-array (.capacity matrix-ptr))
+        _ (.get matrix-ptr matrix-array)
+        min-indices (create-min-index-result-array num-clusters n)
+        cqueue (:cqueue device-context)
+        cl-centroids (:cl-centroids device-context)]
+    (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)
+                   cl-assignments (create-min-index-buffer (:ctx device-context) num-clusters n)
+                   cl-kernel (kernel (:fused-prog device-context) (:fused-kernel device-context))]
+      (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
+                 (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
+      (enq-write! cqueue cl-matrix matrix-array)
+      (enq-kernel! cqueue cl-kernel work-size)
+      (enq-read! cqueue cl-assignments min-indices)
+      (finish! cqueue)
+      min-indices)))
+
+
+(defn fused-minimum-index
+  "Returns nearest-centroid indices using the fused distance+argmin kernel."
+  [conf ds]
+  (let [ds-matrix (dataset->matrix conf ds)]
+    (gpu-fused-assign @gpu-context ds-matrix)))
+
+
+;; The GPU is so much faster than the CPU that we should be preferring
+;; the way it approaches things to the way that the CPU might break down
+;; the problem.  So our CPU outerloop returns arrays of floats just like
 ;; the GPU does.
 (defn distances
   "Returns a vector of distance of the centroids from the point."
