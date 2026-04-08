@@ -56,9 +56,56 @@
    [uncomplicate.neanderthal.core :refer [entry imin mrows ncols rows]]
    [uncomplicate.neanderthal.native :refer [fge fv]]) 
   (:import
+   [java.nio ByteBuffer ByteOrder FloatBuffer]
    [org.bytedeco.javacpp FloatPointer]))
 
 (set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------
+;; Buffer reading
+;; ---------------------------------------------------------------------------
+;;
+;; `(buffer some-neanderthal-matrix)` is polymorphic — depending on the
+;; underlying storage backend it can return either a JavaCPP `FloatPointer`
+;; (where `.capacity` is in floats and `.get(float[])` reads them directly)
+;; or a NIO `DirectByteBuffer` (where `.capacity` is in *bytes* and there
+;; is no `get(float[])` overload — you have to view it as a FloatBuffer
+;; first). The original GPU code paths assumed FloatPointer and broke at
+;; runtime against ByteBuffer with two compounding bugs:
+;;
+;;   1. (float-array (.capacity bb)) allocates 4× more floats than needed
+;;   2. (.get bb float-array) is `IllegalArgumentException: No matching
+;;      method get found taking 1 args for class java.nio.DirectByteBuffer`
+;;
+;; This helper handles both shapes correctly with explicit type hints
+;; (so no reflection) and is the only call site for `(buffer ...)` in
+;; the GPU compute paths below.
+
+(defn ^"[F" read-buffer-as-float-array
+  "Read all floats out of the underlying neanderthal block buffer of a
+   matrix into a fresh `float[]`. Handles both `FloatPointer` (JavaCPP)
+   and `DirectByteBuffer` (NIO direct) storage."
+  [b]
+  (cond
+    (instance? FloatPointer b)
+    (let [^FloatPointer fp b
+          n (.capacity fp)
+          arr (float-array n)]
+      (.get fp arr)
+      arr)
+
+    (instance? ByteBuffer b)
+    (let [^ByteBuffer bb b
+          ;; Native byte order matches what neanderthal / OpenCL produce.
+          ^FloatBuffer fb (.asFloatBuffer (.order bb (ByteOrder/nativeOrder)))
+          n (.capacity fb)
+          arr (float-array n)]
+      (.get fb arr)
+      arr)
+
+    :else
+    (throw (IllegalArgumentException.
+            (str "Unsupported neanderthal block buffer type: " (class b))))))
 
 ;; I don't want to lock people out of using their preferred distance 
 ;; functions. So I'm going to implement distance as a multimethod that 
@@ -244,11 +291,8 @@
         ctx (:ctx @gpu-context)
         k (mrows centroids)
         cols (ncols centroids)
-        cl-centroids (cl-buffer ctx (* k cols Float/BYTES) :read-only) 
-        centroids-ptr (buffer centroids) 
-        centroids-array (float-array (.capacity centroids-ptr))] 
-
-    (.get centroids-ptr centroids-array)
+        cl-centroids (cl-buffer ctx (* k cols Float/BYTES) :read-only)
+        centroids-array (read-buffer-as-float-array (buffer centroids))]
 
     (enq-write! cqueue cl-centroids centroids-array)
 
@@ -328,16 +372,14 @@
          global-work-size [global-size]
          work-size (work-size global-work-size)
          host-msg (direct-buffer (* num-distances Float/BYTES))
-         matrix-ptr (buffer matrix) 
-         matrix-array (float-array (.capacity matrix-ptr))  
-         _ (.get matrix-ptr matrix-array)  
+         matrix-array (read-buffer-as-float-array (buffer matrix))
          cqueue (:cqueue device-context)
          cl-centroids (:cl-centroids device-context)]
      (with-release [cl-result (cl-buffer (:ctx device-context) (* num-distances Float/BYTES) :write-only)
                     cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)
                     cl-kernel (kernel (:prog device-context) (:kernel device-context))]
        (set-args! cl-kernel cl-result cl-matrix cl-centroids (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
-       (enq-write! cqueue cl-matrix matrix-array)  
+       (enq-write! cqueue cl-matrix matrix-array)
        (enq-kernel! cqueue cl-kernel work-size)
        (enq-read! cqueue cl-result host-msg)
        (finish! cqueue)
@@ -356,12 +398,8 @@
          global-work-size [global-size]
          work-size (work-size global-work-size)
          host-msg (direct-buffer (* num-distances Float/BYTES))
-         matrix-ptr (buffer matrix) 
-         centroids-ptr (buffer centroids)  
-         matrix-array (float-array (.capacity matrix-ptr))  
-         centroids-array (float-array (.capacity centroids-ptr))  
-         _ (.get matrix-ptr matrix-array)  
-         _ (.get centroids-ptr centroids-array) 
+         matrix-array (read-buffer-as-float-array (buffer matrix))
+         centroids-array (read-buffer-as-float-array (buffer centroids))
          cqueue (:cqueue device-context)]
      (with-release [cl-result (cl-buffer (:ctx device-context) (* num-distances Float/BYTES) :write-only)
                     cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)
@@ -408,9 +446,7 @@
          num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
          global-work-size [global-size]
          work-size (work-size global-work-size)
-         matrix-ptr (buffer matrix)  
-         matrix-array (float-array (.capacity matrix-ptr))  
-         _ (.get matrix-ptr matrix-array)  
+         matrix-array (read-buffer-as-float-array (buffer matrix))
          min-indices (create-min-index-result-array num-clusters n)
          cqueue (:cqueue device-context)
          cl-centroids (:cl-centroids device-context)]
@@ -441,9 +477,7 @@
          num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
          global-work-size [global-size]
          work-size (work-size global-work-size)
-         matrix-ptr (buffer matrix)  
-         matrix-array (float-array (.capacity matrix-ptr))  
-         _ (.get matrix-ptr matrix-array) 
+         matrix-array (read-buffer-as-float-array (buffer matrix))
          cqueue (:cqueue device-context)
          min-indices (create-min-index-result-array num-clusters n)
          cl-centroids (:cl-centroids device-context)]
