@@ -79,7 +79,7 @@
   (reduce + 0
           (->> (p/read-dataset-seq conf :points)
                (hfln/map (fn [ds] (dataset->dense ds :row :float32)))
-               (hfln/map (fn [matrix] (fv (seq (distance/gpu-distance @distance/gpu-context matrix cluster)))))
+               (hfln/map (fn [matrix] (fv (seq (distances/gpu-distance @distances/gpu-context matrix cluster)))))
                (hfln/map (fn [vector] (sum (vm/pow vector 2)))))))
 
 
@@ -96,7 +96,7 @@
   "Computes the q(x) distribution for all x in the dataset on the GPU."
   ([conf cluster denominator]
    (let [regularizer (qx-regularizer conf)
-         cluster-matrix (distance/dataset->matrix conf cluster)
+         cluster-matrix (distances/dataset->matrix conf cluster)
          qx (fn [matrix]
               (let [vector (fv (seq matrix))]
                 (axpy
@@ -106,8 +106,8 @@
      (hfln/map (fn [ds]
                  (assoc ds :qx
                         (->
-                         (distance/gpu-distance
-                          @distance/gpu-context (distance/dataset->matrix conf ds) cluster-matrix)
+                         (distances/gpu-distance
+                          @distances/gpu-context (distances/dataset->matrix conf ds) cluster-matrix)
                          (qx))))
                (p/read-dataset-seq conf :points)))))
 
@@ -120,7 +120,7 @@
   "Computes and saves the q(x) distribution for all x in the dataset."
   ([conf cluster]
    (p/write-datasets (qx-file conf)
-                     (q-of-x conf cluster (qx-denominator conf (distance/dataset->matrix conf cluster))))))
+                     (q-of-x conf cluster (qx-denominator conf (distances/dataset->matrix conf cluster))))))
 
 
 (s/fdef mcmc-sample
