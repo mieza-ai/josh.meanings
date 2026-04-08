@@ -383,10 +383,14 @@
        (enq-kernel! cqueue cl-kernel work-size)
        (enq-read! cqueue cl-result host-msg)
        (finish! cqueue)
-       (let [data (.asFloatBuffer host-msg)
+       ;; Bulk-read the GPU result into a float[]. The previous per-element
+       ;; (dotimes ... (aset res i (.get data))) loop hit `data` as Object,
+       ;; making each .get reflective; for num-distances on the order of
+       ;; n*num_clusters this dominated total runtime even though the GPU
+       ;; kernel itself was fast.
+       (let [^java.nio.FloatBuffer data (.asFloatBuffer ^java.nio.ByteBuffer host-msg)
              res (float-array num-distances)]
-         (dotimes [i num-distances]
-           (aset res i (.get data)))
+         (.get data res)
          res))))
 
   ([device-context matrix centroids]
@@ -411,10 +415,14 @@
        (enq-kernel! cqueue cl-kernel work-size)
        (enq-read! cqueue cl-result host-msg)
        (finish! cqueue)
-       (let [data (.asFloatBuffer host-msg)
+       ;; Bulk-read the GPU result into a float[]. The previous per-element
+       ;; (dotimes ... (aset res i (.get data))) loop hit `data` as Object,
+       ;; making each .get reflective; for num-distances on the order of
+       ;; n*num_clusters this dominated total runtime even though the GPU
+       ;; kernel itself was fast.
+       (let [^java.nio.FloatBuffer data (.asFloatBuffer ^java.nio.ByteBuffer host-msg)
              res (float-array num-distances)]
-         (dotimes [i num-distances]
-           (aset res i (.get data)))
+         (.get data res)
          res)))))
 
 
