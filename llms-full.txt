@@ -1,0 +1,122 @@
+# mieza.meanings — LLM reference (inline)
+
+GPU-accelerated k-means for Clojure. Optimized for datasets streamed from disk
+(memory-mapped Arrow/Parquet/CSV via tech.ml.dataset), with optional OpenCL
+distance computation (not CUDA).
+
+Coordinates (2025-03 era): `ai.mieza/mieza.meanings {:mvn/version "3.0.14"}` in deps.edn;
+Leiningen dependency vector `ai.mieza/mieza.meanings "3.0.14"` unless overridden by
+`PROJECT_VERSION`.
+
+## Installation
+
+deps.edn:
+```
+ai.mieza/mieza.meanings {:mvn/version "3.0.14"}
+```
+
+project.clj:
+```
+[ai.mieza/mieza.meanings "3.0.14"]
+```
+
+## Quick start
+
+```clojure
+(require '[mieza.meanings.kmeans :refer [k-means k-means-seq]]
+         '[mieza.meanings.protocols.savable :refer [save-model]]
+         '[mieza.meanings.protocols.classifier :refer [assignments]]
+         '[mieza.meanings.records.cluster-result :refer [load-model]])
+
+(def dataset "your_dataset.csv")  ;; or .parquet / .arrow path
+(def k 10)
+
+;; Single run → ClusterResult record: {:centroids :cost :configuration}
+(def model (k-means dataset k))
+
+;; Multiple runs; keep best by total cost
+(def best (apply min-key :cost (take 10 (k-means-seq dataset k))))
+
+;; Persist / load (EDN + embedded centroid rows)
+(def path "cluster-model.edn")
+(save-model best path)
+(def reloaded (load-model path))
+
+(:centroids reloaded)
+(:cost reloaded)
+(:configuration reloaded)
+
+;; Re-score new data chunks (lazy seq of datasets) using saved centroids
+;; (assignments reloaded your-dataset-seq)
+```
+
+`k-means` is a multimethod on the type of the first argument: `String` file path
+or `clojure.lang.LazySeq` of datasets (written to a temp file in the chosen `:format`).
+
+## Core functions
+
+### k-means
+Runs Lloyd iteration to convergence or `:iterations` (default 100).
+Options (keyword varargs after `k`) merge into defaults:
+
+- `:format` — persistence format for internal materialization (`:arrow` default in code; also `:arrows`, `:parquet`, `:csv`). See `mieza.meanings.persistence/formats`.
+- `:init` — initialization method (default `:afk-mc`). See Initialization keys below.
+- `:distance-key` — which distance (default `:emd`). See Distance keys below.
+- `:m` — chain length where sampling-based inits need it (`default-options` use 200).
+- `:columns` — vector of column names to cluster; defaults to all non-assignment columns from the file.
+- `:iterations` — max Lloyd rounds (see `lloyd` in kmeans.clj).
+
+Returns `ClusterResult` with:
+- `:centroids` — tech.ml.dataset dataset of centroids plus `:assignments` column (cluster indices)
+- `:cost` — objective value from `calculate-objective`
+- `:configuration` — map `:k`, `:m`, `:distance-key`, `:init`, `:col-names`
+
+### k-means-seq
+`(k-means-seq dataset k & options)` — `repeatedly` lazy seq of independent runs; use with `min-key` or filtering.
+
+### save-model / load-model
+- `save-model` (protocol `Savable`) on `ClusterResult` writes EDN; centroids serialized via `ds/rows`.
+- `load-model` (in `mieza.meanings.records.cluster-result`) reads file and rebuilds dataset with `ds/->dataset`.
+
+### assignments
+Protocol `Classifier` on `ClusterResult` and `KMeansState`: `(assignments this dataset-seq)` returns lazy seq of datasets with updated `:assignments` column (GPU/CPU via distance stack).
+
+Other helpers in `kmeans` NS: `estimate-size`, `column-names`, `calculate-objective`, etc.
+
+## Distance functions (`:distance-key`)
+
+From `mieza.meanings.distances/distance-keys`:
+`:euclidean`, `:manhattan`, `:chebyshev`, `:correlation`, `:canberra`, `:emd`,
+`:euclidean-sq`, `:discrete`, `:cosine`, `:angular`, `:jensen-shannon`.
+
+Default is `:emd` (see namespace docstring — often you want `:euclidean` for standard k-means).
+
+GPU OpenCL kernels exist for `:emd`, `:euclidean`, `:manhattan`, `:chebyshev`,
+`:euclidean-sq` when configuration enables GPU (`KMeansState` carries `:use-gpu`;
+distance code checks `(:use-gpu conf)`).
+
+## Initialization (`:init`)
+
+Keys from `mieza.meanings.initializations.core/initialization-keys`:
+`:afk-mc`, `:k-mc-squared`, `:naive`, `:k-means-parallel`, `:k-means-++`.
+Default in `default-options` is `:afk-mc`. Custom methods: extend `initialize-centroids` multimethod.
+
+## Formats (`:format`)
+
+`mieza.meanings.persistence/formats`: `:parquet`, `:arrow` (mmap stream reader),
+`:arrows` (IPC), `:csv`. Temporary files use the format’s suffix.
+
+## Testing / JVM
+
+- Tests: `lein test` (GPU tests want OpenCL).
+- Dev profile JVM opts include `--add-modules jdk.incubator.vector`, native access flags, large stack — mirror when debugging.
+
+## Security / reporting
+
+See `SECURITY.md`: supported 3.x; report via GitHub private advisory or security@mieza.ai.
+
+## Docs map
+
+- Human narrative: `doc/intro.md`, `README.md`
+- Maintainer/agent context: `AGENTS.md`
+- Index for tools: `llms.txt` (this file’s short sibling)

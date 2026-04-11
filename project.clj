@@ -1,18 +1,27 @@
-(defproject org.clojars.joshua/josh.meanings (or (System/getenv "PROJECT_VERSION") "3.0.14")
-  :description "Clojure implementation of larger than memory K-Means clustering."
-  :url "https://github.com/jcolechanged/josh.meanings"
+(defproject ai.mieza/mieza.meanings (or (System/getenv "PROJECT_VERSION") "3.0.14")
+  :description "GPU-accelerated K-Means clustering for Clojure. Handles larger-than-memory datasets."
+  :url "https://github.com/tacktechai/mieza.meanings"
+  :scm {:name "git"
+        :url "https://github.com/tacktechai/mieza.meanings"}
   :license {:name "The MIT License"
             :url "https://opensource.org/licenses/MIT"}
-  :dependencies [[org.clojure/clojure "1.11.3"]
+  :dependencies [[org.clojure/clojure "1.12.4"]
                  [org.clojure/data.csv "1.0.1"]
                  [babashka/fs "0.4.18"]
 
-                 [techascent/tech.ml.dataset "7.030"]
-                 [generateme/fastmath "2.4.0"]
-                 [uncomplicate/neanderthal "0.49.1"]
-                 [org.bytedeco/mkl "2024.0-1.5.10" :classifier linux-x86_64-redist]
-                 [org.bytedeco/cuda "12.3-8.9-1.5.10" :classifier linux-x86_64-redist]
-                 [cnuernber/dtype-next "10.113"]
+                 [techascent/tech.ml.dataset "8.011"]
+                 [generateme/fastmath "2.4.0"
+                  :exclusions [com.github.haifengl/smile-mkl
+                               org.bytedeco/javacpp
+                               org.bytedeco/javacpp-platform
+                               org.bytedeco/mkl
+                               org.bytedeco/mkl-platform
+                               org.bytedeco/mkl-platform-redist
+                               org.bytedeco/openblas
+                               org.bytedeco/openblas-platform]]
+                 [uncomplicate/neanderthal "0.61.0"]
+                 [org.bytedeco/mkl "2025.3-1.5.13" :classifier "linux-x86_64-redist"]
+                 [cnuernber/dtype-next "11.013"]
                  ;; Arrow support 
                  [org.apache.arrow/arrow-vector "6.0.0"
                   :exclusions [commons-codec/commons-codec
@@ -47,14 +56,25 @@
                  [org.apache.hadoop/hadoop-mapreduce-client-core  "3.3.0"
                   :exclusions [org.slf4j/slf4j-log4j12]]
                  [org.clojars.joshua/sampling "3.3"]]
-  :plugins [[org.clojars.joshua/josh.benchmarking "0.0.4"]]
-  :repl-options {:init-ns josh.meanings.kmeans}
+  :plugins [[org.clojars.joshua/josh.benchmarking "0.0.4"]
+            [lein-codox "0.10.8"]]
+  :codox {:source-paths ["src/clj"]
+          :output-path "target/docs"
+          :source-uri "https://github.com/tacktechai/mieza.meanings/blob/main/{filepath}#L{line}"
+          :metadata {:doc/format :markdown}}
+  :repl-options {:init-ns mieza.meanings.kmeans}
   :source-paths ["src/clj" "src/kernels"]
-  :profiles {:dev
+  :profiles {:test
+             {:jvm-opts ["-Xss20m"
+                         "--add-modules" "jdk.incubator.vector"
+                         "--enable-native-access=ALL-UNNAMED"
+                         "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED"
+                         "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]}
+             :dev
              {:jvm-opts ["-Djdk.attach.allowAttachSelf"
                          "-XX:+TieredCompilation"
                          "-Xss20m"
-                         "--add-modules" "jdk.incubator.foreign,jdk.incubator.vector"
+                         "--add-modules" "jdk.incubator.vector"
                          "--enable-native-access=ALL-UNNAMED"
                          "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED"
                          "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]

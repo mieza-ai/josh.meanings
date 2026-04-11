@@ -1,0 +1,12 @@
+# Default reviewers for all changes. Ensure GitHub teams exist under the org
+# and turn on "Require review from Code Owners" in branch protection when ready.
+* @tacktechai/meanings-core
+
+# OpenCL kernels and GPU distance integration
+src/kernels/ @tacktechai/meanings-gpu
+src/clj/mieza/meanings/distances.clj @tacktechai/meanings-gpu
+
+# Build and dependency coordinates
+project.clj @tacktechai/meanings-core
+deps.edn @tacktechai/meanings-core
+.github/workflows/ @tacktechai/meanings-core

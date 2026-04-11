@@ -1,0 +1,45 @@
+# CPU-hosted CI on GitHub-hosted runners. A CPU OpenCL ICD is installed so
+# OpenCL namespaces/tests can load; hardware GPU coverage remains maintainer-run
+# or self-hosted per docs/plans/ci-cd.md.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache Maven repo
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: "${{ runner.os }}-lein-${{ hashFiles('project.clj') }}"
+          restore-keys: |
+            ${{ runner.os }}-lein-
+
+      - name: Install Leiningen
+        run: |
+          sudo curl -sSfL -o /usr/local/bin/lein https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein
+          sudo chmod +x /usr/local/bin/lein
+
+      - name: Install OpenCL CPU runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ocl-icd-opencl-dev pocl-opencl-icd
+
+      - name: Dependencies
+        run: lein deps
+
+      - name: Tests
+        run: lein test

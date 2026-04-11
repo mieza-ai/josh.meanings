@@ -1,13 +1,23 @@
 {:paths ["src/clj" "src/kernels" "resources"]
- :deps {org.clojure/clojure {:mvn/version "1.11.3"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.4"}
         org.clojure/data.csv {:mvn/version "1.0.1"}
+        org.clojure/core.cache {:mvn/version "1.2.263"}
+        org.clojure/core.memoize {:mvn/version "1.2.281"}
         babashka/fs {:mvn/version "0.4.18"}
-        techascent/tech.ml.dataset {:mvn/version "7.030"}
-        generateme/fastmath {:mvn/version "2.4.0"}
-        uncomplicate/neanderthal {:mvn/version "0.49.1"}
-        org.bytedeco/mkl$linux-x86_64-redist {:mvn/version "2024.0-1.5.10"}
+        techascent/tech.ml.dataset {:mvn/version "8.011"}
+        generateme/fastmath {:mvn/version "2.4.0"
+                              :exclusions [com.github.haifengl/smile-mkl
+                                           org.bytedeco/javacpp
+                                           org.bytedeco/javacpp-platform
+                                           org.bytedeco/mkl
+                                           org.bytedeco/mkl-platform
+                                           org.bytedeco/mkl-platform-redist
+                                           org.bytedeco/openblas
+                                           org.bytedeco/openblas-platform]}
+        uncomplicate/neanderthal {:mvn/version "0.61.0"}
+        org.bytedeco/mkl$linux-x86_64-redist {:mvn/version "2025.3-1.5.13"}
         org.bytedeco/cuda$linux-x86_64-redist {:mvn/version "12.3-8.9-1.5.10"}
-        cnuernber/dtype-next {:mvn/version "10.113"}
+        cnuernber/dtype-next {:mvn/version "11.013"}
         org.apache.arrow/arrow-vector {:mvn/version "6.0.0"
                                        :exclusions [commons-codec/commons-codec
                                                     com.fasterxml.jackson.core/jackson-core
@@ -41,9 +51,19 @@
                  :jvm-opts ["-Djdk.attach.allowAttachSelf"
                             "-XX:+TieredCompilation"
                             "-Xss20m"
-                            "--add-modules" "jdk.incubator.foreign,jdk.incubator.vector"
+                            "--add-modules" "jdk.incubator.vector"
                             "--enable-native-access=ALL-UNNAMED"
                             "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED"
                             "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]
                  :extra-paths ["test"]}
+           :test {:extra-deps {criterium/criterium {:mvn/version "0.4.6"}
+                               org.clojure/test.check {:mvn/version "1.1.1"}}
+                  :extra-paths ["test"]
+                  :jvm-opts ["-Xss20m"
+                             "--add-modules" "jdk.incubator.vector"
+                             "--enable-native-access=ALL-UNNAMED"
+                             "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED"
+                             "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]
+                  :main-opts ["-m" "cognitect.test-runner"]
+                  :exec-fn cognitect.test-runner.api/test}
            :notebook {:extra-deps {io.github.nextjournal/clerk {:mvn/version "0.15.957"}}}}}

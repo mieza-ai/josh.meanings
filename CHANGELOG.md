@@ -6,6 +6,33 @@ For releases before version [1.0.0] this project *did not* follow [semver](https
 For releases after version 1.0.0 this project *will* follow semver, with the addition that minor
 releases might only add additional tests and/or documentation updates rather than bug fixes.
 
+## [Unreleased]
+
+### Added
+
+- GitHub issue and PR templates, `CODEOWNERS`, `AGENTS.md`, `llms.txt`, and `llms-full.txt`.
+- cljdoc sidebar config (`doc/cljdoc.edn`) and `:scm` metadata in `project.clj` for published docs.
+- GitHub Actions CI workflow (`ci.yml`) and Dependabot updates for GitHub Actions.
+- Local API doc generation via `lein-codox` (`lein codox`).
+- `:test` JVM profile flags (incubator vector, native access) aligned with dev for CI/local tests.
+
+### Changed
+
+- README quick start now matches the current `ClusterResult` / `save-model` / `load-model` / `assignments` API; added CI, cljdoc, and MIT badges.
+- Docstrings expanded for `k-means`, `k-means-seq`, and the `Classifier` / `Savable` protocols.
+- `CONTRIBUTING` describes GitHub Actions; ignore stray `*.nippy` test artifacts.
+- `doc/intro.md`: documented that the default `:format` is `:arrow` (per `kmeans` defaults).
+- Rebranded from `josh.meanings` to `mieza.meanings` under [mieza.ai](https://mieza.ai) stewardship.
+- Artifact coordinates changed from `org.clojars.joshua/josh.meanings` to `ai.mieza/mieza.meanings`.
+- All namespaces renamed from `josh.meanings.*` to `mieza.meanings.*`.
+- Updated project URL to `https://github.com/tacktechai/mieza.meanings`.
+- Updated copyright to include mieza.ai (original copyright by Joshua Cole retained).
+
+### Fixed
+
+- Aligned Leiningen native MKL/Javacpp dependencies with Neanderthal and installed the CI OpenCL CPU runtime needed by OpenCL-loading tests.
+- Excluded assignment labels from the centroid feature buffer used by OpenCL distance kernels.
+
 ## [13.0.6] - 2025-05-21
 
 ### Added
@@ -159,5 +186,4 @@ from buffered csv reading to optimized tech.ml.dataset usage.
 
 - Initial project created with support for k-means clustering on larger than memory datasets.
 - Only configuration provided is choice of k. Distance function used is earth mover distance.
-
 
