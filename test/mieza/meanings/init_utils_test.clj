@@ -17,7 +17,8 @@
           nil         ;; k-means fn
           100         ;; size-estimate
           ["x" "y"]   ;; col-names
-          false)      ;; use-gpu
+          false        ;; use-gpu
+          false)      ;; fused-assign
          overrides))
 
 ;; --- vector->dataset ---

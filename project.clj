@@ -10,8 +10,17 @@
                  [babashka/fs "0.4.18"]
 
                  [techascent/tech.ml.dataset "8.011"]
-                 [generateme/fastmath "2.4.0"]
+                 [generateme/fastmath "2.4.0"
+                  :exclusions [com.github.haifengl/smile-mkl
+                               org.bytedeco/javacpp
+                               org.bytedeco/javacpp-platform
+                               org.bytedeco/mkl
+                               org.bytedeco/mkl-platform
+                               org.bytedeco/mkl-platform-redist
+                               org.bytedeco/openblas
+                               org.bytedeco/openblas-platform]]
                  [uncomplicate/neanderthal "0.61.0"]
+                 [org.bytedeco/mkl "2025.3-1.5.13" :classifier "linux-x86_64-redist"]
                  [cnuernber/dtype-next "11.013"]
                  ;; Arrow support 
                  [org.apache.arrow/arrow-vector "6.0.0"

@@ -28,6 +28,10 @@ releases might only add additional tests and/or documentation updates rather tha
 - Updated project URL to `https://github.com/tacktechai/mieza.meanings`.
 - Updated copyright to include mieza.ai (original copyright by Joshua Cole retained).
 
+### Fixed
+
+- Aligned Leiningen native MKL/Javacpp dependencies with Neanderthal to avoid MKL load failures in CI and local tests.
+
 ## [13.0.6] - 2025-05-21
 
 ### Added
@@ -181,5 +185,4 @@ from buffered csv reading to optimized tech.ml.dataset usage.
 
 - Initial project created with support for k-means clustering on larger than memory datasets.
 - Only configuration provided is choice of k. Distance function used is earth mover distance.
-
 
