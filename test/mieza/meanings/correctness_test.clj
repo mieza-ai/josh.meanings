@@ -8,7 +8,8 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.java.io :as io]
             [clojure.data.csv :as csv]
-            [mieza.meanings.kmeans :refer [k-means k-means-seq]]
+            [mieza.meanings.distances :as distances]
+            [mieza.meanings.kmeans :refer [initialize-k-means-state k-means k-means-seq lloyd]]
             [tech.v3.dataset :as ds]))
 
 (defn write-csv! [filename rows]
@@ -97,7 +98,17 @@
        [0 0] [1 0] [0 1] [1 1]
        [100 0] [101 0] [100 1] [101 1]
        [0 100] [1 100] [0 101] [1 101]]
-      (let [r (best-of 10 "test.separated.csv" 3 :distance-key :euclidean :init :afk-mc :m 50)
+      (let [conf (initialize-k-means-state
+                  "test.separated.csv"
+                  3
+                  {:distance-key :euclidean :init :afk-mc :m 50})
+            initial-centroids (ds/->dataset
+                               {"x" [0.5 100.5 0.5]
+                                "y" [0.5 0.5 100.5]
+                                :assignments [0 1 2]})
+            initial-centroids (ds/select-columns initial-centroids ["x" "y" :assignments])
+            r (distances/with-gpu-context conf
+                (lloyd conf initial-centroids))
             col-names (:col-names (:configuration r))
             centroids (mapv (fn [row] (mapv #(double (get row %)) col-names))
                             (ds/rows (:centroids r)))

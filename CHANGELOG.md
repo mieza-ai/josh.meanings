@@ -31,6 +31,7 @@ releases might only add additional tests and/or documentation updates rather tha
 ### Fixed
 
 - Aligned Leiningen native MKL/Javacpp dependencies with Neanderthal and installed the CI OpenCL CPU runtime needed by OpenCL-loading tests.
+- Excluded assignment labels from the centroid feature buffer used by OpenCL distance kernels.
 
 ## [13.0.6] - 2025-05-21
 

@@ -297,11 +297,18 @@
   (swap! gpu-context assoc :cl-centroids nil)
   (swap! gpu-context assoc :k nil))
 
+(defn centroid-feature-columns
+  [centroids-ds]
+  (remove #{:assignments "assignments"} (ds/column-names centroids-ds)))
+
 
 (defmacro with-centroids
   [centroids-ds & forms]
-  `(do
-     (write-centroids-buffer! gpu-context (dataset->matrix ~centroids-ds))
+  `(let [centroids# ~centroids-ds
+         centroid-features# (ds/select-columns centroids# (centroid-feature-columns centroids#))]
+     (write-centroids-buffer!
+      gpu-context
+      (dataset->matrix centroid-features#))
      (try
        ~@forms
        (finally
