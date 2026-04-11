@@ -43,11 +43,14 @@
   [ds-seq k m]
   ;; 1 initial cluster, (k - 1) remaining clusters, each of which need 
   ;; to generate a markov chain of length m
-  (uniform-sample ds-seq (+ 1 (* (- k 1) m)) :replace true))
+  (let [k (long k)
+        m (long m)]
+    (uniform-sample ds-seq (+ 1 (* (- k 1) m)) :replace true)))
 
 (defn- square
   [x]
-  (* x x))
+  (let [x (double x)]
+    (* x x)))
 
 (defn make-weight-fn
   "Create a function which computes the weight of a point given the 
@@ -72,7 +75,10 @@
          dx (first dseq)]
     (if (empty? ps)
       x
-      (let [take (or (zero? dx) (> (/ (first dseq) dx) (first rands)))]
+      (let [dx (double dx)
+            candidate-dx (double (first dseq))
+            rand (double (first rands))
+            take (or (zero? dx) (> (/ candidate-dx dx) rand))]
         (recur
          (rest ps)
          (rest dseq)
