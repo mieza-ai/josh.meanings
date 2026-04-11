@@ -1,5 +1,6 @@
-# CPU-focused CI on GitHub-hosted runners. OpenCL/GPU coverage remains
-# maintainer-run or self-hosted per docs/plans/ci-cd.md.
+# CPU-hosted CI on GitHub-hosted runners. A CPU OpenCL ICD is installed so
+# OpenCL namespaces/tests can load; hardware GPU coverage remains maintainer-run
+# or self-hosted per docs/plans/ci-cd.md.
 name: CI
 
 on:
@@ -31,6 +32,11 @@ jobs:
         run: |
           sudo curl -sSfL -o /usr/local/bin/lein https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein
           sudo chmod +x /usr/local/bin/lein
+
+      - name: Install OpenCL CPU runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ocl-icd-opencl-dev pocl-opencl-icd
 
       - name: Dependencies
         run: lein deps

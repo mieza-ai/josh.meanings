@@ -30,7 +30,7 @@ releases might only add additional tests and/or documentation updates rather tha
 
 ### Fixed
 
-- Aligned Leiningen native MKL/Javacpp dependencies with Neanderthal to avoid MKL load failures in CI and local tests.
+- Aligned Leiningen native MKL/Javacpp dependencies with Neanderthal and installed the CI OpenCL CPU runtime needed by OpenCL-loading tests.
 
 ## [13.0.6] - 2025-05-21
 
