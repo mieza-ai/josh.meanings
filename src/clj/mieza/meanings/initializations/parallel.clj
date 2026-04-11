@@ -26,7 +26,7 @@
   [config]
   (log/info "Performing k means parallel initialization")
   (let [ds-seq (persist/read-dataset-seq config :points)
-        k (:k config)
+        k (long (:k config))
         oversample-factor (* 2 k)
         iterations 5
         k-means (:k-means config)]

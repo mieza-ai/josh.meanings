@@ -2,7 +2,10 @@
   (:require
    [clojure.string]
    [clojure.test :refer [deftest is testing]]
-   [mieza.meanings.distances :refer [size->bytes cpu-distance gpu-distance get-device-context teardown-device]]
+   [mieza.meanings.distances :refer [size->bytes cpu-distance gpu-distance
+                                     get-device-context teardown-device
+                                     centroid-feature-columns with-gpu-context
+                                     with-centroids minimum-index]]
    [tech.v3.dataset :as ds]
    [tech.v3.dataset.neanderthal :as dsn]))
 
@@ -58,3 +61,30 @@
    (is (= 1 (size->bytes 250))))
   (testing
    (is (= 2 (size->bytes 500)))))
+
+
+(deftest test-centroid-feature-columns
+  (testing "assignment helper columns are not centroid features"
+    (let [centroids (ds/->dataset (array-map "x" [0.0 10.0]
+                                             "y" [0.0 10.0]
+                                             :assignments [1000 1000]
+                                             "assignments" [900 900]))]
+      (is (= ["x" "y"] (vec (centroid-feature-columns centroids)))))))
+
+
+(deftest test-gpu-centroid-buffer-ignores-assignment-columns
+  (testing "with-centroids writes only feature columns into the GPU centroid buffer"
+    (let [points (ds/->dataset (array-map "x" [0.0 10.0]
+                                          "y" [0.0 10.0]))
+          centroids (ds/->dataset (array-map "x" [0.0 10.0]
+                                             "y" [0.0 10.0]
+                                             :assignments [1000 1000]
+                                             "assignments" [900 900]))
+          configuration {:k 2
+                         :col-names ["x" "y"]
+                         :distance-key :euclidean
+                         :centroids centroids
+                         :use-gpu true}]
+      (with-gpu-context configuration
+        (with-centroids centroids
+          (is (= [0 1] (vec (minimum-index configuration points)))))))))

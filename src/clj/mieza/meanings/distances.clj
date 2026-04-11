@@ -160,30 +160,41 @@
 ;; WHen working on the GPU we have to transfer data and back forth.  We want to do 
 ;; that using the smallest sizes possible because data transfer between the GPU and 
 ;; CPU represents a large fraction of the compute time.
-(defn size->bytes
+(c/defn size->bytes
   "Returns the size in bytes needed to identify all centroid indices."
   [size]
-  (cond
-    (< size (Math/pow 2 8))
-    1
-    (< size (Math/pow 2 16))
-    2
-    (< size (Math/pow 2 32))
-    4))
+  (let [size (long size)]
+    (cond
+      (< size 256)
+      1
+      (< size 65536)
+      2
+      (< size 4294967296)
+      4)))
 
 
-(defn bytes->type
+(c/defn bytes->type
   "Returns the type OpenCL uses to represent a given number of bytes."
   [bytes]
-  (cond
-    (= bytes 1)
-    "uchar"
+  (let [bytes (long bytes)]
+    (cond
+      (= bytes 1)
+      "uchar"
 
-    (= bytes 2)
-    "ushort"
+      (= bytes 2)
+      "ushort"
 
-    (= bytes 4)
-    "uint"))
+      (= bytes 4)
+      "uint")))
+
+(c/defn- work-item-batches
+  [n global-size]
+  (let [n (long n)
+        global-size (long global-size)
+        batch-count (quot n global-size)]
+    (if (zero? (rem n global-size))
+      batch-count
+      (inc batch-count))))
 
 ;; To the use the GPU we need to setup a context through which we will interact with the GPU.
 ;; There can be potentially many GPUs and we want to be able to leverage all of them to gain the 
@@ -364,11 +375,12 @@
 (defn gpu-distance
   "Evaluates many distances in parallel."
   ([device-context matrix]
-   (let [num-clusters (:k device-context)
-         n (mrows matrix)
+   (let [num-clusters (long (:k device-context))
+         n (long (mrows matrix))
+         cols (long (ncols matrix))
          num-distances (* n num-clusters)
-         global-size 1024
-         num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
+         global-size (long 1024)
+         num-per (work-item-batches n global-size)
          global-work-size [global-size]
          work-size (work-size global-work-size)
          ^java.nio.ByteBuffer host-msg (direct-buffer (* num-distances Float/BYTES))
@@ -378,7 +390,7 @@
          cqueue (:cqueue device-context)
          cl-centroids (:cl-centroids device-context)]
      (with-release [cl-result (cl-buffer (:ctx device-context) (* num-distances Float/BYTES) :write-only)
-                    cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)
+                    cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
                     cl-kernel (kernel (:prog device-context) (:kernel device-context))]
        (set-args! cl-kernel cl-result cl-matrix cl-centroids (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
        (enq-write! cqueue cl-matrix matrix-array)
@@ -392,11 +404,13 @@
          res))))
 
   ([device-context matrix centroids]
-   (let [num-clusters (mrows centroids)
-         n (mrows matrix)
+   (let [num-clusters (long (mrows centroids))
+         n (long (mrows matrix))
+         cols (long (ncols matrix))
+         centroid-cols (long (ncols centroids))
          num-distances (* n num-clusters)
-         global-size 1024
-         num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
+         global-size (long 1024)
+         num-per (work-item-batches n global-size)
          global-work-size [global-size]
          work-size (work-size global-work-size)
          ^java.nio.ByteBuffer host-msg (direct-buffer (* num-distances Float/BYTES))
@@ -408,8 +422,8 @@
          _ (.get centroids-ptr centroids-array)
          cqueue (:cqueue device-context)]
      (with-release [cl-result (cl-buffer (:ctx device-context) (* num-distances Float/BYTES) :write-only)
-                    cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)
-                    cl-centroids (cl-buffer (:ctx device-context) (* num-clusters (ncols centroids) Float/BYTES) :read-only)
+                    cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
+                    cl-centroids (cl-buffer (:ctx device-context) (* num-clusters centroid-cols Float/BYTES) :read-only)
                     cl-kernel (kernel (:prog device-context) (:kernel device-context))]
        (set-args! cl-kernel cl-result cl-matrix cl-centroids (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
        (enq-write! cqueue cl-matrix matrix-array)
@@ -426,12 +440,12 @@
 
 (defn create-min-index-buffer
   "The number of clusters determines the type of the assignments."
-  [context cluster-count row-count]
-  (cl-buffer context (* row-count (size->bytes cluster-count)) :write-only))
+  [context ^long cluster-count ^long row-count]
+  (cl-buffer context (* row-count (long (size->bytes cluster-count))) :write-only))
 
 
 (defn create-min-index-result-array
-  [cluster-count num-rows]
+  [^long cluster-count ^long num-rows]
   (let [array-type (case (int (size->bytes cluster-count))
                      1
                      byte-array
@@ -445,11 +459,12 @@
 (defn gpu-distance-min-index
   "Evaluates many distances in parallel."
   ([device-context matrix]
-   (let [num-clusters (:k device-context)
-         n (mrows matrix)
+   (let [num-clusters (long (:k device-context))
+         n (long (mrows matrix))
+         cols (long (ncols matrix))
          num-distances (* n num-clusters)
-         global-size 1024
-         num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
+         global-size (long 1024)
+         num-per (work-item-batches n global-size)
          global-work-size [global-size]
          work-size (work-size global-work-size)
          ^FloatPointer matrix-ptr (buffer matrix)
@@ -460,7 +475,7 @@
          cl-centroids (:cl-centroids device-context)]
 
      (with-release [cl-result (cl-buffer (:ctx device-context) (* num-distances Float/BYTES) :read-write)
-                    cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)]
+                    cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)]
        (with-release [cl-kernel (kernel (:prog device-context) (:kernel device-context))]
          (set-args! cl-kernel cl-result cl-matrix cl-centroids
                     (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
@@ -478,11 +493,11 @@
          min-indices))))
 
   ([device-context matrix assignments points]
-   (let [num-clusters (:k device-context)
-         n (mrows matrix)
+   (let [num-clusters (long (:k device-context))
+         n (long (mrows matrix))
          num-distances (* n num-clusters)
-         global-size 1024
-         num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
+         global-size (long 1024)
+         num-per (work-item-batches n global-size)
          global-work-size [global-size]
          work-size (work-size global-work-size)
          ^FloatPointer matrix-ptr (buffer matrix)
@@ -518,10 +533,11 @@
   "Computes distance + argmin in a single kernel, returning assignment indices.
    Eliminates the intermediate N*K distance matrix entirely."
   [device-context matrix]
-  (let [num-clusters (:k device-context)
-        n (mrows matrix)
-        global-size 1024
-        num-per (if (pos? (mod n global-size)) (inc (quot n global-size)) (quot n global-size))
+  (let [num-clusters (long (:k device-context))
+        n (long (mrows matrix))
+        cols (long (ncols matrix))
+        global-size (long 1024)
+        num-per (work-item-batches n global-size)
         global-work-size [global-size]
         work-size (work-size global-work-size)
         ^FloatPointer matrix-ptr (buffer matrix)
@@ -530,7 +546,7 @@
         min-indices (create-min-index-result-array num-clusters n)
         cqueue (:cqueue device-context)
         cl-centroids (:cl-centroids device-context)]
-    (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n (ncols matrix) Float/BYTES) :read-only)
+    (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
                    cl-assignments (create-min-index-buffer (:ctx device-context) num-clusters n)
                    cl-kernel (kernel (:fused-prog device-context) (:fused-kernel device-context))]
       (set-args! cl-kernel cl-assignments cl-matrix cl-centroids

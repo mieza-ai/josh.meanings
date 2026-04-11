@@ -84,7 +84,8 @@
 
 
 (s/fdef qx-regularizer :args (s/cat :conf :mieza.meanings.specs/configuration) :ret number?)
-(defn qx-regularizer [conf] (/ 1.0 (* (:size-estimate conf) 2)))
+(defn qx-regularizer ^double [conf]
+  (/ 1.0 (* (double (:size-estimate conf)) 2.0)))
 
 
 (s/fdef q-of-x
@@ -97,7 +98,7 @@
    Implements Bachem et al. 2016 (NeurIPS) Eq. 4:
      q(x|c1) = (1/2) * d(x,c1)^2 / sum_x' d(x',c1)^2 + 1/(2n)
    The denominator passed in is sum_x' d(x',c1)^2 (computed in qx-denominator)."
-  ([conf cluster denominator]
+  ([conf cluster ^double denominator]
    (let [regularizer (qx-regularizer conf)
          cluster-matrix (distances/dataset->matrix conf cluster)
          qx (fn [matrix]
@@ -147,9 +148,9 @@
         rands     (ne/view-vctr (utils/generate-random-buffer points))
         cluster-index (reduce
                        (fn [^long acc-index ^long index]
-                         (let [acc  (ne/entry w acc-index)
-                               wy   (ne/entry w index)
-                               rand (ne/entry rands index)]
+                         (let [acc  (double (ne/entry w acc-index))
+                               wy   (double (ne/entry w index))
+                               rand (double (ne/entry rands index))]
                            (if (or (zero? acc) (> (/ wy acc) rand))
                              index
                              acc-index)))
@@ -176,12 +177,12 @@
   [conf]
   (distances/with-gpu-context conf
     (let [initial-cluster (sample-one conf)
-          k (:k conf)
+          k (long (:k conf))
           _ (q-of-x! conf initial-cluster)
           progress-bar (pr/progress-bar k)
           _  (println "Sampling clusters...")
           final-clusters (loop [clusters initial-cluster]
-                           (let [centroid-count (ds/row-count clusters)]
+                           (let [centroid-count (long (ds/row-count clusters))]
                              (pr/print (pr/tick progress-bar centroid-count))
                              (if (< centroid-count k)
                                (recur (ds/concat clusters (find-next-cluster conf clusters)))

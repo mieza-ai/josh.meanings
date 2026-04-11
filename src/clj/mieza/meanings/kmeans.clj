@@ -157,12 +157,12 @@
                            :initial-centroids :mieza.meanings.specs/dataset))
 (defn lloyd ^ClusterResult [^KMeansState conf initial-centroids]
   (let [column-names (:col-names conf)
-        max-iterations (get conf :iterations 100)
+        max-iterations (long (get conf :iterations 100))
         progress-bar (pr/progress-bar max-iterations)]
     (println "Performing lloyd iteration...")
     (let [final-centroids
           (loop [centroids initial-centroids
-                 iteration 0]
+                 iteration (long 0)]
             (if (< iteration max-iterations)
               (do
                 (pr/print (pr/tick progress-bar iteration))
@@ -203,13 +203,23 @@
 
 (defn- float-array->centroid-ds
   "Builds a centroid dataset from a flat row-major float array [k, dims]."
-  [^floats centroid-arr k col-names]
-  (let [dims (count col-names)
-        rows (for [c (range k)]
-               (let [offset (* c dims)]
-                 (zipmap (conj col-names :assignments)
-                         (conj (mapv #(aget centroid-arr (+ offset %)) (range dims))
-                               c))))]
+  [^floats centroid-arr ^long k col-names]
+  (let [dims (long (count col-names))
+        rows (loop [c (long 0)
+                    acc []]
+               (if (< c k)
+                 (let [offset (* c dims)
+                       row-values (loop [d (long 0)
+                                         values []]
+                                    (if (< d dims)
+                                      (recur (inc d)
+                                             (conj values (aget centroid-arr (int (+ offset d)))))
+                                      values))]
+                   (recur (inc c)
+                          (conj acc
+                                (zipmap (conj col-names :assignments)
+                                        (conj row-values c)))))
+                 acc))]
     (ds/->dataset rows)))
 
 
@@ -255,10 +265,10 @@
 (defn- compute-centroids-from-sums
   "Divides accumulated sums by counts to get new centroid coordinates.
    Returns a flat float array [k, dims]."
-  ^floats [^doubles centroid-sums ^ints centroid-counts k dims]
+  ^floats [^doubles centroid-sums ^ints centroid-counts ^long k ^long dims]
   (let [result (float-array (* k dims))]
     (dotimes [c k]
-      (let [cnt (aget centroid-counts c)
+      (let [cnt (int (aget centroid-counts c))
             c-offset (* c dims)]
         (if (pos? cnt)
           (dotimes [d dims]
@@ -268,6 +278,22 @@
           (dotimes [d dims]
             (aset result (+ c-offset d) Float/NaN)))))
     result))
+
+
+(defn- point-squared-distance
+  [points-arr centroid-arr p-offset c-offset dims]
+  (let [^floats points-arr points-arr
+        ^floats centroid-arr centroid-arr
+        p-offset (long p-offset)
+        c-offset (long c-offset)
+        dims (long dims)]
+    (loop [d (long 0)
+           dist (double 0.0)]
+      (if (>= d dims)
+        dist
+        (let [diff (- (double (aget points-arr (int (+ p-offset d))))
+                      (double (aget centroid-arr (int (+ c-offset d)))))]
+          (recur (inc d) (+ dist (* diff diff))))))))
 
 
 (defn- centroids-converged?
@@ -312,25 +338,20 @@
         inertia-acc (atom 0.0)]
     (doseq [[matrix points-arr n] chunks]
       (let [assignments-arr (distances/gpu-fused-assign ctx matrix)
-            n (int n) dims-i (int dims)]
+            n (long n)
+            dims-i (long dims)]
         (accumulate-chunk! points-arr assignments-arr sums counts n dims-i)
         ;; Compute inertia contribution
-        (clojure.core/loop [i (int 0) chunk-cost (double 0.0)]
+        (clojure.core/loop [i (long 0) chunk-cost (double 0.0)]
           (if (>= i n)
             (swap! inertia-acc + chunk-cost)
             (let [c (int (assignment-at assignments-arr i))
-                  p-off (int (* i dims-i))
-                  c-off (int (* c dims-i))]
-              (recur (unchecked-inc-int i)
-                     (clojure.core/loop [d (int 0) dist (double 0.0)]
-                       (if (>= d dims-i)
-                         (+ chunk-cost dist)
-                         (let [diff (- (double (aget ^floats points-arr (int (+ p-off d))))
-                                       (double (aget centroid-arr (int (+ c-off d)))))]
-                           (recur (unchecked-inc-int d)
-                                  (+ dist (* diff diff))))))))))))
+                  p-off (* i dims-i)
+                  c-off (* (long c) dims-i)
+                  point-dist (double (point-squared-distance points-arr centroid-arr p-off c-off dims-i))]
+              (recur (inc i) (+ chunk-cost point-dist)))))))
     (distances/release-centroids-buffer! distances/gpu-context)
-    (let [new-arr (compute-centroids-from-sums sums counts k dims)]
+    (let [^floats new-arr (compute-centroids-from-sums sums counts k dims)]
       ;; Fill empty clusters from old centroids
       (dotimes [c k]
         (when (Float/isNaN (aget new-arr (* c dims)))
@@ -343,22 +364,24 @@
    Bypasses the dataset abstraction layer for centroid updates entirely."
   ^ClusterResult [^KMeansState conf initial-centroids]
   (let [col-names (:col-names conf)
-        dims (count col-names)
-        k (:k conf)
-        max-iterations (get conf :iterations 100)
+        dims (long (count col-names))
+        k (long (:k conf))
+        max-iterations (long (get conf :iterations 100))
         progress-bar (pr/progress-bar max-iterations)]
     (println "Performing fast lloyd iteration...")
     (let [initial-arr (centroid-ds->float-array initial-centroids col-names)
           chunks (preload-chunks conf)
           [final-arr final-inertia]
           (loop [^floats centroid-arr initial-arr
-                 iteration 0
-                 prev-inertia Double/MAX_VALUE]
+                 iteration (long 0)
+                 prev-inertia (double Double/MAX_VALUE)]
             (pr/print (pr/tick progress-bar iteration))
             (if (>= iteration max-iterations)
               (do (pr/print (pr/done (pr/tick progress-bar iteration)))
                   [centroid-arr prev-inertia])
-              (let [[new-arr new-inertia] (lloyd-fast-iteration chunks centroid-arr k dims)
+              (let [iteration-result (lloyd-fast-iteration chunks centroid-arr k dims)
+                    ^floats new-arr (nth iteration-result 0)
+                    new-inertia (double (nth iteration-result 1))
                     rel-change (/ (Math/abs (- prev-inertia new-inertia))
                                   (Math/max (Math/abs new-inertia) 1.0))]
                 (when-let [on-progress (:on-progress conf)]
