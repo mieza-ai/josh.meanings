@@ -145,7 +145,8 @@
    Implements Bachem et al. 2016 Algorithm 1 line 11. The MH acceptance ratio
    for AFK-MC^2 with proposal q(x) targeting p(x|C) ∝ d(x,C)^2 is:
        α = min( (d^2(y,C) · q(x)) / (d^2(x,C) · q(y)), 1 )
-   Precompute w(i) = d^2(i,C) / q(i) so the ratio becomes w(y)/w(x)."
+   Precompute w(i) = d^2(i,C) / q(i) so the ratio becomes w(y)/w(x).
+   Releases all intermediate Neanderthal vectors to prevent native memory accumulation."
   [conf points clusters]
   (let [min-dists (distances/minimum-distance conf points clusters)
         d2        (vm/pow min-dists 2)
@@ -161,9 +162,14 @@
                              index
                              acc-index)))
                        0
-                       (range 0 (dim w)))]
-    (->  (ds/select-rows points cluster-index)
-         (ds/select-columns (:col-names conf)))))
+                       (range 0 (dim w)))
+        result (->  (ds/select-rows points cluster-index)
+                    (ds/select-columns (:col-names conf)))]
+    (uc/release min-dists)
+    (uc/release d2)
+    (uc/release qx-vec)
+    (uc/release w)
+    result))
 
 
 (s/fdef find-next-cluster
