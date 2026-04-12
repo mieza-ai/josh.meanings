@@ -30,6 +30,7 @@
    [taoensso.timbre :as log]
    [tech.v3.dataset :as ds]
    [tech.v3.dataset.neanderthal :refer [dataset->dense]]
+   [uncomplicate.commons.core :as uc]
    [uncomplicate.neanderthal.core :as ne :refer [axpy dim entry! sum]]
    [uncomplicate.neanderthal.native :refer [fv]]
    [uncomplicate.neanderthal.vect-math :as vm]
@@ -74,13 +75,21 @@
                :cluster :mieza.meanings.specs/dataset)
   :ret number?)
 (defn qx-denominator
-  "Calculates the denominator of the q(x) distribution."
+  "Calculates the denominator of the q(x) distribution.
+   Releases Neanderthal matrices per chunk to prevent native memory accumulation."
   [conf cluster]
-  (reduce + 0
-          (->> (p/read-dataset-seq conf :points)
-               (hfln/map (fn [ds] (dataset->dense ds :row :float32)))
-               (hfln/map (fn [matrix] (fv (seq (distances/gpu-distance @distances/gpu-context matrix cluster)))))
-               (hfln/map (fn [vector] (sum (vm/pow vector 2)))))))
+  (reduce + 0.0
+          (hfln/map (fn [ds]
+                      (let [matrix (dataset->dense ds :row :float32)
+                            dists  (distances/gpu-distance @distances/gpu-context matrix cluster)
+                            _      (uc/release matrix)
+                            v      (fv (seq dists))
+                            v2     (vm/pow v 2)
+                            result (sum v2)]
+                        (uc/release v)
+                        (uc/release v2)
+                        result))
+                    (p/read-dataset-seq conf :points))))
 
 
 (s/fdef qx-regularizer :args (s/cat :conf :mieza.meanings.specs/configuration) :ret number?)
@@ -96,24 +105,22 @@
   "Computes the q(x) distribution for all x in the dataset on the GPU.
    Implements Bachem et al. 2016 (NeurIPS) Eq. 4:
      q(x|c1) = (1/2) * d(x,c1)^2 / sum_x' d(x',c1)^2 + 1/(2n)
-   The denominator passed in is sum_x' d(x',c1)^2 (computed in qx-denominator)."
+   The denominator passed in is sum_x' d(x',c1)^2 (computed in qx-denominator).
+   Releases Neanderthal matrices per chunk to prevent native memory accumulation."
   ([conf cluster denominator]
    (let [regularizer (qx-regularizer conf)
-         cluster-matrix (distances/dataset->matrix conf cluster)
-         qx (fn [matrix]
-              ;; matrix is the raw distance vector d(x, c1) returned by gpu-distance.
-              ;; Square it, then compute (1/2) * d^2 / denominator + regularizer.
-              (let [d2 (vm/pow (fv (seq matrix)) 2)]
-                (axpy
-                 (/ 0.5 denominator)
-                 d2
-                 (entry! (fv (seq matrix)) regularizer))))]
+         cluster-matrix (distances/dataset->matrix conf cluster)]
      (hfln/map (fn [ds]
-                 (assoc ds :qx
-                        (->
-                         (distances/gpu-distance
-                          @distances/gpu-context (distances/dataset->matrix conf ds) cluster-matrix)
-                         (qx))))
+                 (let [matrix (distances/dataset->matrix conf ds)
+                       dists  (distances/gpu-distance @distances/gpu-context matrix cluster-matrix)
+                       _      (uc/release matrix)
+                       dist-v (fv (seq dists))
+                       d2     (vm/pow dist-v 2)
+                       reg-v  (entry! (fv (seq dists)) regularizer)
+                       qx-val (axpy (/ 0.5 denominator) d2 reg-v)]
+                   (uc/release dist-v)
+                   (uc/release d2)
+                   (assoc ds :qx qx-val)))
                (p/read-dataset-seq conf :points)))))
 
 
