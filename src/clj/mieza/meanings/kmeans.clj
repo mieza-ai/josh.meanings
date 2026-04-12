@@ -29,6 +29,7 @@
             [progrock.core :as pr]
             [tech.v3.dataset :as ds]
             [tech.v3.dataset.reductions :as dsr]
+            [uncomplicate.commons.core :as uc]
             [uncomplicate.neanderthal.core :as ne]
             [uncomplicate.neanderthal.native :as ne-native]
             [clj-fast.clojure.core :refer [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-]])
@@ -303,7 +304,8 @@
 
 (defn- lloyd-fast-iteration
   "Runs one Lloyd iteration: GPU fused assign + CPU accumulation.
-   Streams chunks from disk via mmap so only one chunk is resident at a time.
+   Streams chunks from disk via mmap, releasing each Neanderthal matrix
+   immediately after use to prevent native memory accumulation.
    Returns [new-centroid-arr inertia]."
   [^KMeansState conf ^floats centroid-arr ^long k ^long dims]
   (let [centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
@@ -312,9 +314,13 @@
         sums (double-array (* k dims))
         counts (int-array k)
         inertia-acc (atom 0.0)]
-    (doseq [[matrix points-arr n] (stream-chunks conf)]
-      (let [assignments-arr (distances/gpu-fused-assign ctx matrix)
-            n (int n) dims-i (int dims)]
+    (doseq [ds (persist/read-dataset-seq conf :points)]
+      (let [matrix (distances/dataset->matrix conf ds)
+            n (int (ne/mrows matrix))
+            assignments-arr (distances/gpu-fused-assign ctx matrix)
+            points-arr (distances/matrix->float-array matrix)
+            _ (uc/release matrix)
+            dims-i (int dims)]
         (accumulate-chunk! points-arr assignments-arr sums counts n dims-i)
         ;; Compute inertia contribution
         (clojure.core/loop [i (int 0) chunk-cost (double 0.0)]
@@ -331,6 +337,7 @@
                                        (double (aget centroid-arr (int (+ c-off d)))))]
                            (recur (unchecked-inc-int d)
                                   (+ dist (* diff diff))))))))))))
+    (uc/release centroid-matrix)
     (distances/release-centroids-buffer! distances/gpu-context)
     (let [new-arr (compute-centroids-from-sums sums counts k dims)]
       ;; Fill empty clusters from old centroids
