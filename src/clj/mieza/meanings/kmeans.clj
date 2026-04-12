@@ -52,7 +52,7 @@
    :init         default-init
    :distance-key default-distance-key
    :chain-length default-chain-length
-   :fused-assign false})
+   :fused-assign true})
 
 
 (defn estimate-size
@@ -287,30 +287,32 @@
           (recur (unchecked-inc-int i) (+ shift (* d d))))))))
 
 
-(defn- preload-chunks
-  "Preloads dataset chunks as [matrix float-array n] triples.
-   Keeps Neanderthal matrices for GPU and raw float arrays for CPU accumulation."
+(defn- stream-chunks
+  "Returns a lazy sequence of [matrix float-array n] triples, reading
+   dataset chunks from disk on demand. Each call produces a fresh seq
+   so the caller can traverse the dataset multiple times across Lloyd
+   iterations without pinning all chunks in memory simultaneously."
   [^KMeansState conf]
-  (doall
-   (map (fn [ds]
-          (let [matrix (distances/dataset->matrix conf ds)
-                n (ne/mrows matrix)
-                points-arr (distances/matrix->float-array matrix)]
-            [matrix points-arr n]))
-        (persist/read-dataset-seq conf :points))))
+  (map (fn [ds]
+         (let [matrix (distances/dataset->matrix conf ds)
+               n (ne/mrows matrix)
+               points-arr (distances/matrix->float-array matrix)]
+           [matrix points-arr n]))
+       (persist/read-dataset-seq conf :points)))
 
 
 (defn- lloyd-fast-iteration
   "Runs one Lloyd iteration: GPU fused assign + CPU accumulation.
+   Streams chunks from disk via mmap so only one chunk is resident at a time.
    Returns [new-centroid-arr inertia]."
-  [chunks ^floats centroid-arr ^long k ^long dims]
+  [^KMeansState conf ^floats centroid-arr ^long k ^long dims]
   (let [centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
         _ (distances/write-centroids-buffer! distances/gpu-context centroid-matrix)
         ctx @distances/gpu-context
         sums (double-array (* k dims))
         counts (int-array k)
         inertia-acc (atom 0.0)]
-    (doseq [[matrix points-arr n] chunks]
+    (doseq [[matrix points-arr n] (stream-chunks conf)]
       (let [assignments-arr (distances/gpu-fused-assign ctx matrix)
             n (int n) dims-i (int dims)]
         (accumulate-chunk! points-arr assignments-arr sums counts n dims-i)
@@ -349,7 +351,6 @@
         progress-bar (pr/progress-bar max-iterations)]
     (println "Performing fast lloyd iteration...")
     (let [initial-arr (centroid-ds->float-array initial-centroids col-names)
-          chunks (preload-chunks conf)
           [final-arr final-inertia]
           (loop [^floats centroid-arr initial-arr
                  iteration 0
@@ -358,7 +359,7 @@
             (if (>= iteration max-iterations)
               (do (pr/print (pr/done (pr/tick progress-bar iteration)))
                   [centroid-arr prev-inertia])
-              (let [[new-arr new-inertia] (lloyd-fast-iteration chunks centroid-arr k dims)
+              (let [[new-arr new-inertia] (lloyd-fast-iteration conf centroid-arr k dims)
                     rel-change (/ (Math/abs (- prev-inertia new-inertia))
                                   (Math/max (Math/abs new-inertia) 1.0))]
                 (when-let [on-progress (:on-progress conf)]
