@@ -1,0 +1,56 @@
+[
+  {
+    "dataset": "small_2d",
+    "method": "sklearn.KMeans",
+    "n_points": 10000,
+    "n_dims": 2,
+    "k": 5,
+    "elapsed_s": 0.154,
+    "inertia": 20078.52
+  },
+  {
+    "dataset": "small_2d",
+    "method": "sklearn.MiniBatchKMeans",
+    "n_points": 10000,
+    "n_dims": 2,
+    "k": 5,
+    "elapsed_s": 0.017,
+    "inertia": 20079.25
+  },
+  {
+    "dataset": "med_50d",
+    "method": "sklearn.KMeans",
+    "n_points": 1000000,
+    "n_dims": 50,
+    "k": 10,
+    "elapsed_s": 2.977,
+    "inertia": 50076420.0
+  },
+  {
+    "dataset": "med_50d",
+    "method": "sklearn.MiniBatchKMeans",
+    "n_points": 1000000,
+    "n_dims": 50,
+    "k": 10,
+    "elapsed_s": 0.292,
+    "inertia": 50196920.0
+  },
+  {
+    "dataset": "large_50d",
+    "method": "sklearn.KMeans",
+    "n_points": 10000000,
+    "n_dims": 50,
+    "k": 10,
+    "elapsed_s": 24.932,
+    "inertia": 1754024320.0
+  },
+  {
+    "dataset": "large_50d",
+    "method": "sklearn.MiniBatchKMeans",
+    "n_points": 10000000,
+    "n_dims": 50,
+    "k": 10,
+    "elapsed_s": 0.634,
+    "inertia": 500999904.0
+  }
+]

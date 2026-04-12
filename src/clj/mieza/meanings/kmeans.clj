@@ -53,7 +53,7 @@
    :init         default-init
    :distance-key default-distance-key
    :chain-length default-chain-length
-   :fused-assign true})
+   :fused-assign false})
 
 
 (defn estimate-size
