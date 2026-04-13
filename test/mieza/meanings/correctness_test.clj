@@ -51,7 +51,7 @@
       ;; Points: (0,0), (1,0), (10,0), (11,0). k=2.
       ;; Optimal: centroids at (0.5,0) and (10.5,0). Cost = 4 * 0.5 = 2.0
       [["x" "y"] [0 0] [1 0] [10 0] [11 0]]
-      (let [r (best-of 10 "test.handcost.csv" 2 :distance-key :euclidean :init :afk-mc :m 50)]
+      (let [r (best-of 10 "test.handcost.csv" 2 :distance-key :euclidean :init :afk-mc :m 50 :fused-assign false)]
         (is (< (Math/abs (- (:cost r) 2.0)) 0.01)
             "Cost should be 2.0 for this configuration")))))
 
