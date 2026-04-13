@@ -24,4 +24,4 @@
   PClusteringState
   (configuration
    [this]
-   (select-keys this [:k :init :distance-key :m :col-names])))
+   (select-keys this [:k :init :distance-key :m :col-names :use-gpu :fused-assign])))

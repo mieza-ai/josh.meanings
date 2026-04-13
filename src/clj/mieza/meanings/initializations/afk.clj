@@ -68,65 +68,59 @@
     (weighted-sample (load-datasets-with-qx conf) qx-column-name (:m conf)))))
 
 
-(s/fdef qx-denominator-accelerated
-  :args (s/cat :device-context map?
-               :conf :mieza.meanings.specs/configuration
-               :cluster :mieza.meanings.specs/dataset)
-  :ret number?)
-(defn qx-denominator
-  "Calculates the denominator of the q(x) distribution."
-  [conf cluster]
-  (reduce + 0
-          (->> (p/read-dataset-seq conf :points)
-               (hfln/map (fn [ds] (dataset->dense ds :row :float32)))
-               (hfln/map (fn [matrix] (fv (seq (distances/gpu-distance @distances/gpu-context matrix cluster)))))
-               (hfln/map (fn [vector] (sum (vm/pow vector 2)))))))
-
-
 (s/fdef qx-regularizer :args (s/cat :conf :mieza.meanings.specs/configuration) :ret number?)
 (defn qx-regularizer ^double [conf]
   (/ 1.0 (* (double (:size-estimate conf)) 2.0)))
 
 
-(s/fdef q-of-x
-  :args (s/cat :conf :mieza.meanings.specs/configuration
-               :cluster :mieza.meanings.specs/dataset
-               :denominator number?)
-  :ret :mieza.meanings.specs/datasets)
-(defn- q-of-x
-  "Computes the q(x) distribution for all x in the dataset on the GPU.
-   Implements Bachem et al. 2016 (NeurIPS) Eq. 4:
-     q(x|c1) = (1/2) * d(x,c1)^2 / sum_x' d(x',c1)^2 + 1/(2n)
-   The denominator passed in is sum_x' d(x',c1)^2 (computed in qx-denominator)."
-  ([conf cluster ^double denominator]
-   (let [regularizer (qx-regularizer conf)
-         cluster-matrix (distances/dataset->matrix conf cluster)
-         qx (fn [matrix]
-              ;; matrix is the raw distance vector d(x, c1) returned by gpu-distance.
-              ;; Square it, then compute (1/2) * d^2 / denominator + regularizer.
-              (let [d2 (vm/pow (fv (seq matrix)) 2)]
-                (axpy
-                 (/ 0.5 denominator)
-                 d2
-                 (entry! (fv (seq matrix)) regularizer))))]
-     (hfln/map (fn [ds]
-                 (assoc ds :qx
-                        (->
-                         (distances/gpu-distance
-                          @distances/gpu-context (distances/dataset->matrix conf ds) cluster-matrix)
-                         (qx))))
-               (p/read-dataset-seq conf :points)))))
-
+(defn- d2-temp-file
+  "Returns the path to a temporary file for storing squared distances."
+  [conf]
+  (let [file (:points conf)] (str (fs/path (fs/parent file) "d2-temp.arrow"))))
 
 
 (s/fdef q-of-x!
   :args (s/cat :conf :mieza.meanings.specs/configuration
                :clusters :mieza.meanings.specs/dataset))
 (defn q-of-x!
-  "Computes and saves the q(x) distribution for all x in the dataset."
+  "Computes and saves the q(x) distribution for all x in the dataset.
+   Optimized single-pass: streams the dataset once to compute GPU distances,
+   writes squared distances to a temp file while accumulating the denominator,
+   then reads the temp file to apply the q(x) formula without recomputing distances."
   ([conf cluster]
-   (p/write-datasets (qx-file conf)
-                     (q-of-x conf cluster (qx-denominator conf (distances/dataset->matrix conf cluster))))))
+   (let [cluster-matrix (distances/dataset->matrix conf cluster)
+         gpu-ctx        @distances/gpu-context
+         temp-path      (d2-temp-file conf)
+         ;; Phase 1: single pass over dataset — compute GPU distances once,
+         ;; write d² per chunk to temp file, and accumulate denominator.
+         denominator    (let [acc (volatile! (double 0))]
+                          (p/write-datasets
+                           temp-path
+                           (hfln/map
+                            (c/fn [ds]
+                              (let [data-matrix (distances/dataset->matrix conf ds)
+                                    raw-dists   (distances/gpu-distance gpu-ctx data-matrix cluster-matrix)
+                                    d2-vec      (vm/pow (fv (seq raw-dists)) 2)]
+                                (vswap! acc (c/fn [^double v] (+ v (double (sum d2-vec)))))
+                                (ds/->dataset {"d2" (seq d2-vec)})))
+                            (p/read-dataset-seq conf :points)))
+                          @acc)
+         ;; Phase 2: read d² from temp file, apply q(x) formula — no GPU needed.
+         regularizer    (qx-regularizer conf)]
+     (p/write-datasets
+      (qx-file conf)
+      (c/map
+       (c/fn [orig-ds d2-ds]
+         (let [d2-vec (fv (get d2-ds "d2"))]
+           (assoc orig-ds :qx
+                  (seq (axpy
+                        (/ 0.5 denominator)
+                        d2-vec
+                        (entry! (fv (dim d2-vec)) regularizer))))))
+       (p/read-dataset-seq conf :points)
+       (p/read-dataset-seq temp-path)))
+     ;; Clean up temp file.
+     (fs/delete-if-exists temp-path))))
 
 
 (s/fdef mcmc-sample
