@@ -196,6 +196,15 @@
       batch-count
       (inc batch-count))))
 
+(c/defn- round-up-to-multiple
+  [n size]
+  (let [n (long n)
+        size (long size)
+        remainder (rem n size)]
+    (if (zero? remainder)
+      n
+      (+ n (- size remainder)))))
+
 ;; To the use the GPU we need to setup a context through which we will interact with the GPU.
 ;; There can be potentially many GPUs and we want to be able to leverage all of them to gain the 
 ;; maximum possible speed.
@@ -532,30 +541,37 @@
 (defn gpu-fused-assign
   "Computes distance + argmin in a single kernel, returning assignment indices.
    Eliminates the intermediate N*K distance matrix entirely."
-  [device-context matrix]
-  (let [num-clusters (long (:k device-context))
-        n (long (mrows matrix))
-        cols (long (ncols matrix))
-        global-size (long 1024)
-        num-per (work-item-batches n global-size)
-        global-work-size [global-size]
-        work-size (work-size global-work-size)
-        ^FloatPointer matrix-ptr (buffer matrix)
-        matrix-array (float-array (.capacity matrix-ptr))
-        _ (.get matrix-ptr matrix-array)
-        min-indices (create-min-index-result-array num-clusters n)
-        cqueue (:cqueue device-context)
-        cl-centroids (:cl-centroids device-context)]
-    (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
-                   cl-assignments (create-min-index-buffer (:ctx device-context) num-clusters n)
-                   cl-kernel (kernel (:fused-prog device-context) (:fused-kernel device-context))]
-      (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
-                 (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
-      (enq-write! cqueue cl-matrix matrix-array)
-      (enq-kernel! cqueue cl-kernel work-size)
-      (enq-read! cqueue cl-assignments min-indices)
-      (finish! cqueue)
-      min-indices)))
+  ([device-context matrix]
+   (gpu-fused-assign device-context matrix (or (:fused-local-size device-context) 128)))
+  ([device-context matrix local-size]
+   (let [num-clusters (long (:k device-context))
+         n (long (mrows matrix))
+         cols (long (ncols matrix))
+         local-size (long local-size)
+         _ (when-not (pos? local-size)
+             (throw (IllegalArgumentException. "local-size must be positive")))
+         global-size (long (round-up-to-multiple n local-size))
+         _ (when-not (zero? (rem global-size local-size))
+             (throw (IllegalStateException. "global-size must be divisible by local-size")))
+         global-work-size [global-size]
+         local-work-size [local-size]
+         work-size (work-size global-work-size local-work-size)
+         ^FloatPointer matrix-ptr (buffer matrix)
+         matrix-array (float-array (.capacity matrix-ptr))
+         _ (.get matrix-ptr matrix-array)
+         min-indices (create-min-index-result-array num-clusters n)
+         cqueue (:cqueue device-context)
+         cl-centroids (:cl-centroids device-context)]
+     (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
+                    cl-assignments (create-min-index-buffer (:ctx device-context) num-clusters n)
+                    cl-kernel (kernel (:fused-prog device-context) (:fused-kernel device-context))]
+       (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
+                  (int-array [1]) (int-array [n]) (int-array [num-clusters]))
+       (enq-write! cqueue cl-matrix matrix-array)
+       (enq-kernel! cqueue cl-kernel work-size)
+       (enq-read! cqueue cl-assignments min-indices)
+       (finish! cqueue)
+       min-indices))))
 
 
 (defn fused-minimum-index
