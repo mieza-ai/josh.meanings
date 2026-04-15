@@ -143,7 +143,9 @@
    :chebyshev    {:program "chebyshev_multi.c"    :kernel "chebyshev_distances"
                   :fused-program "fused_chebyshev_assign.c"    :fused-kernel "fused_chebyshev_assign"}
    :euclidean-sq {:program "euclidean_sq_multi.c" :kernel "euclidean_sq_distances"
-                  :fused-program "fused_euclidean_sq_assign.c" :fused-kernel "fused_euclidean_sq_assign"}})
+                  :fused-program "fused_euclidean_sq_assign.c" :fused-kernel "fused_euclidean_sq_assign"
+                  :reduce-program "fused_euclidean_sq_assign_reduce.c"
+                  :reduce-kernel "fused_euclidean_sq_assign_reduce"}})
 
 ;; We can tell whether we can use an outerloop GPU program instead of innerloop 
 ;; function calls by calling a predicate function.  This will allow for seemless 
@@ -196,6 +198,12 @@
       batch-count
       (inc batch-count))))
 
+(def ^:private reduce-local-size 256)
+
+(c/defn- rounded-global-size
+  [n local-size]
+  (* (long local-size) (work-item-batches n local-size)))
+
 ;; To the use the GPU we need to setup a context through which we will interact with the GPU.
 ;; There can be potentially many GPUs and we want to be able to leverage all of them to gain the 
 ;; maximum possible speed.
@@ -245,6 +253,21 @@
                           (println "Failed to compile fused kernel:" (.getMessage e))
                           (when fused-program (println (build-log fused-program dev)))
                           nil)))
+         reduce-program-source (when k
+                                 (some-> distance-configuration :reduce-program io/resource slurp))
+         reduce-program (when reduce-program-source
+                          (program-with-source ctx [reduce-program-source]))
+         reduce-prog (when reduce-program
+                       (try
+                         (build-program! reduce-program
+                                         (str "-DSIZE=" length
+                                              " -DMAX_CLUSTERS=" k
+                                              " -DLOCAL_SIZE=" reduce-local-size)
+                                         channel)
+                         (catch Exception e
+                           (println "Failed to compile fused reduce kernel:" (.getMessage e))
+                           (when reduce-program (println (build-log reduce-program dev)))
+                           nil)))
          gpu-context-map {:chan channel
                           :dev dev
                           :kernel  (-> distance-configuration :kernel)
@@ -260,7 +283,11 @@
                           :sum-kernel "sum_by_group"
                           :fused-program fused-program
                           :fused-prog fused-prog
-                          :fused-kernel (-> distance-configuration :fused-kernel)}]
+                          :fused-kernel (-> distance-configuration :fused-kernel)
+                          :reduce-program reduce-program
+                          :reduce-prog reduce-prog
+                          :reduce-kernel (-> distance-configuration :reduce-kernel)
+                          :reduce-local-size reduce-local-size}]
      (reset! gpu-context gpu-context-map)
      gpu-context-map)))
 
@@ -334,7 +361,9 @@
      (clojurecl/release (k device-context)))
    ;; Release fused kernel resources if they were compiled
    (when-let [fp (:fused-program device-context)] (clojurecl/release fp))
-   (when-let [fp (:fused-prog device-context)] (clojurecl/release fp))))
+   (when-let [fp (:fused-prog device-context)] (clojurecl/release fp))
+   (when-let [rp (:reduce-program device-context)] (clojurecl/release rp))
+   (when-let [rp (:reduce-prog device-context)] (clojurecl/release rp))))
 
 
 (defmacro with-gpu-context
@@ -556,6 +585,89 @@
       (enq-read! cqueue cl-assignments min-indices)
       (finish! cqueue)
       min-indices)))
+
+
+(defn reduce-accelerated?
+  "Returns true when the fused assign+partial-reduce kernel is available.
+   The first implementation is intentionally limited to :euclidean-sq."
+  [conf]
+  (boolean (c/get-in gpu-accelerated [(:distance-key conf) :reduce-program])))
+
+
+(c/defn- reduce-block-partials
+  [partial-sums partial-counts partial-inertia block-count num-clusters dims]
+  (let [^floats partial-sums partial-sums
+        ^ints partial-counts partial-counts
+        ^floats partial-inertia partial-inertia
+        block-count (long block-count)
+        num-clusters (long num-clusters)
+        dims (long dims)
+        sum-count (* num-clusters dims)
+        sums (double-array sum-count)
+        counts (int-array num-clusters)]
+    (c/loop [block (long 0)
+             inertia (double 0.0)]
+      (if (>= block block-count)
+        {:sums sums
+         :counts counts
+         :inertia inertia}
+        (let [sum-offset (* block sum-count)
+              count-offset (* block num-clusters)]
+          (dotimes [i sum-count]
+            (aset sums i (+ (aget sums i)
+                            (double (aget partial-sums (int (+ sum-offset i)))))))
+          (dotimes [c num-clusters]
+            (aset counts c (int (+ (aget counts c)
+                                    (aget partial-counts (int (+ count-offset c)))))))
+          (recur (inc block)
+                 (+ inertia (double (aget partial-inertia (int block))))))))))
+
+
+(defn gpu-fused-assign-and-reduce
+  "Computes Euclidean-squared assignment and per-block centroid partials on the
+   GPU, then reduces block partials on the CPU in double precision.
+   Returns {:sums double-array :counts int-array :inertia double}."
+  [device-context matrix]
+  (when-not (:reduce-prog device-context)
+    (throw (ex-info "Fused assign+reduce is only available for :euclidean-sq."
+                    {:distance-key (:distance-key device-context)})))
+  (let [num-clusters (long (:k device-context))
+        n (long (mrows matrix))
+        cols (long (ncols matrix))]
+    (if (zero? n)
+      {:sums (double-array (* num-clusters cols))
+       :counts (int-array num-clusters)
+       :inertia 0.0}
+      (let [local-size (long (:reduce-local-size device-context))
+            block-count (long (work-item-batches n local-size))
+            global-size (long (rounded-global-size n local-size))
+            work-size (work-size [global-size] [local-size])
+            partial-sum-count (* block-count num-clusters cols)
+            partial-count-count (* block-count num-clusters)
+            partial-sums (float-array partial-sum-count)
+            partial-counts (int-array partial-count-count)
+            partial-inertia (float-array block-count)
+            ^FloatPointer matrix-ptr (buffer matrix)
+            matrix-array (float-array (.capacity matrix-ptr))
+            _ (.get matrix-ptr matrix-array)
+            cqueue (:cqueue device-context)
+            cl-centroids (:cl-centroids device-context)]
+        (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
+                       cl-partial-sums (cl-buffer (:ctx device-context) (* partial-sum-count Float/BYTES) :write-only)
+                       cl-partial-counts (cl-buffer (:ctx device-context) (* partial-count-count Integer/BYTES) :write-only)
+                       cl-partial-inertia (cl-buffer (:ctx device-context) (* block-count Float/BYTES) :write-only)
+                       cl-kernel (kernel (:reduce-prog device-context) (:reduce-kernel device-context))]
+          (set-args! cl-kernel cl-matrix cl-centroids
+                     cl-partial-sums cl-partial-counts cl-partial-inertia
+                     (int-array [n]) (int-array [num-clusters]))
+          (enq-write! cqueue cl-matrix matrix-array)
+          (enq-kernel! cqueue cl-kernel work-size)
+          (enq-read! cqueue cl-partial-sums partial-sums)
+          (enq-read! cqueue cl-partial-counts partial-counts)
+          (enq-read! cqueue cl-partial-inertia partial-inertia)
+          (finish! cqueue)
+          (reduce-block-partials partial-sums partial-counts partial-inertia
+                                 block-count num-clusters cols))))))
 
 
 (defn fused-minimum-index

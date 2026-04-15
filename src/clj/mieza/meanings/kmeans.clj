@@ -52,7 +52,8 @@
    :init         default-init
    :distance-key default-distance-key
    :chain-length default-chain-length
-   :fused-assign true})
+   :fused-assign true
+   :fused-reduce false})
 
 
 (defn estimate-size
@@ -70,7 +71,7 @@
 (defn initialize-k-means-state
   "Sets initial configuration options for the k means calculation."
   [points-file k options]
-  (let [{:keys [format init distance-key m fused-assign on-progress]} (merge default-options options)
+  (let [{:keys [format init distance-key m fused-assign fused-reduce on-progress]} (merge default-options options)
         points-file (persist/convert-file points-file format)
         col-names (get options :columns (column-names points-file))
         state (assoc (->KMeansState
@@ -85,6 +86,7 @@
                       col-names
                       true
                       fused-assign)
+                     :fused-reduce fused-reduce
                      :distance-fn (distances/get-distance-fn distance-key))]
     (cond-> state
       on-progress (assoc :on-progress on-progress))))
@@ -359,6 +361,53 @@
       [new-arr @inertia-acc])))
 
 
+(defn- merge-reduced-chunk!
+  [^doubles centroid-sums ^ints centroid-counts reduced-chunk]
+  (let [^doubles chunk-sums (:sums reduced-chunk)
+        ^ints chunk-counts (:counts reduced-chunk)
+        sum-count (alength centroid-sums)
+        cluster-count (alength centroid-counts)]
+    (dotimes [i sum-count]
+      (aset centroid-sums i (+ (aget centroid-sums i)
+                               (aget chunk-sums i))))
+    (dotimes [c cluster-count]
+      (aset centroid-counts c (int (+ (aget centroid-counts c)
+                                      (aget chunk-counts c)))))
+    (double (:inertia reduced-chunk))))
+
+
+(defn- lloyd-fast-reduced-iteration
+  "Runs one Lloyd iteration: GPU fused Euclidean-sq assign + block partial
+   reduction, followed by CPU double reduction over the small block partials.
+   Returns [new-centroid-arr inertia]."
+  [^KMeansState conf ^floats centroid-arr ^long k ^long dims]
+  (let [centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
+        sums (double-array (* k dims))
+        counts (int-array k)]
+    (distances/write-centroids-buffer! distances/gpu-context centroid-matrix)
+    (let [inertia
+          (try
+            (reduce
+             (fn [acc ds]
+               (let [matrix (distances/dataset->matrix conf ds)
+                     reduced-chunk (distances/gpu-fused-assign-and-reduce @distances/gpu-context matrix)]
+                 ;; Correctness note: for :euclidean-sq, the kernel computes the
+                 ;; same argmin assignment as the old fused path, then returns
+                 ;; per-cluster sums/counts. Reducing those partials in double
+                 ;; precision gives the same centroid means as accumulate-chunk!.
+                 (+ (double acc)
+                    (merge-reduced-chunk! sums counts reduced-chunk))))
+             0.0
+             (persist/read-dataset-seq conf :points))
+            (finally
+              (distances/release-centroids-buffer! distances/gpu-context)))]
+      (let [^floats new-arr (compute-centroids-from-sums sums counts k dims)]
+        (dotimes [c k]
+          (when (Float/isNaN (aget new-arr (* c dims)))
+            (System/arraycopy centroid-arr (* c dims) new-arr (* c dims) dims)))
+        [new-arr inertia]))))
+
+
 (defn lloyd-fast
   "Fast Lloyd iteration using fused GPU assignment + Java array accumulation.
    Bypasses the dataset abstraction layer for centroid updates entirely."
@@ -404,6 +453,53 @@
         :configuration (.configuration conf)}))))
 
 
+(defn lloyd-fast-reduced
+  "Fast Lloyd iteration using GPU fused Euclidean-sq assignment plus per-block
+   partial reduction. Only :euclidean-sq is supported by this kernel path."
+  ^ClusterResult [^KMeansState conf initial-centroids]
+  (when-not (distances/reduce-accelerated? conf)
+    (throw (ex-info ":fused-reduce is currently supported only for :euclidean-sq."
+                    {:distance-key (:distance-key conf)})))
+  (let [col-names (:col-names conf)
+        dims (long (count col-names))
+        k (long (:k conf))
+        max-iterations (long (get conf :iterations 100))
+        progress-bar (pr/progress-bar max-iterations)]
+    (println "Performing fast reduced lloyd iteration...")
+    (let [initial-arr (centroid-ds->float-array initial-centroids col-names)
+          [final-arr final-inertia]
+          (loop [^floats centroid-arr initial-arr
+                 iteration (long 0)
+                 prev-inertia (double Double/MAX_VALUE)]
+            (pr/print (pr/tick progress-bar iteration))
+            (if (>= iteration max-iterations)
+              (do (pr/print (pr/done (pr/tick progress-bar iteration)))
+                  [centroid-arr prev-inertia])
+              (let [iteration-result (lloyd-fast-reduced-iteration conf centroid-arr k dims)
+                    ^floats new-arr (nth iteration-result 0)
+                    new-inertia (double (nth iteration-result 1))
+                    rel-change (/ (Math/abs (- prev-inertia new-inertia))
+                                  (Math/max (Math/abs new-inertia) 1.0))]
+                (when-let [on-progress (:on-progress conf)]
+                  (on-progress {:iteration iteration
+                                :max-iterations max-iterations
+                                :cost new-inertia}))
+                (if (and (> iteration 0) (< rel-change 1e-4))
+                  (do (pr/print (pr/done (pr/tick progress-bar max-iterations)))
+                      (when-let [on-progress (:on-progress conf)]
+                        (on-progress {:iteration iteration
+                                      :max-iterations max-iterations
+                                      :cost new-inertia
+                                      :converged true}))
+                      [new-arr new-inertia])
+                  (recur new-arr (inc iteration) new-inertia)))))
+          final-centroids (float-array->centroid-ds final-arr k col-names)]
+      (map->ClusterResult
+       {:centroids final-centroids
+        :cost final-inertia
+        :configuration (.configuration conf)}))))
+
+
 (defn k-means-via-file
   [points-filepath k & options]
   (let [^KMeansState conf (initialize-k-means-state points-filepath k (apply hash-map options))
@@ -411,9 +507,19 @@
         (assoc (initialize-centroids conf)
                :assignments
                (range 0 (:k conf)))]
+    (when (and (:fused-reduce conf)
+               (not (distances/reduce-accelerated? conf)))
+      (throw (ex-info ":fused-reduce is currently supported only for :euclidean-sq."
+                      {:distance-key (:distance-key conf)})))
     (distances/with-gpu-context conf
-      (if (:fused-assign conf)
+      (cond
+        (:fused-reduce conf)
+        (lloyd-fast-reduced conf centroids)
+
+        (:fused-assign conf)
         (lloyd-fast conf centroids)
+
+        :else
         (lloyd conf centroids)))))
 
 
@@ -444,6 +550,7 @@
     | `:columns` | Feature column names; default: all columns except assignment helpers |
     | `:iterations` | Max Lloyd iterations (default 100) |
     | `:fused-assign` | When true, use fused distance+argmin kernel (default false) |
+    | `:fused-reduce` | When true with `:euclidean-sq`, use fused assignment plus GPU block partial reduction |
 
   **Returns** a record with `:centroids`, `:cost`, and `:configuration`.
 
