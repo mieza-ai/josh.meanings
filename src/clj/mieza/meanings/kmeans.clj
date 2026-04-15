@@ -33,7 +33,11 @@
             [uncomplicate.neanderthal.native :as ne-native]
             [clj-fast.clojure.core :refer [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-]])
   (:import [mieza.meanings.records.cluster_result ClusterResult]
-           [mieza.meanings.records.clustering_state KMeansState]))
+           [mieza.meanings.records.clustering_state KMeansState]
+           [java.io RandomAccessFile]
+           [java.nio ByteBuffer ByteOrder]
+           [java.nio.channels FileChannel]
+           [org.apache.arrow.flatbuf Message MessageHeader RecordBatch]))
 
 
 
@@ -55,11 +59,97 @@
    :fused-assign true})
 
 
-(defn estimate-size
-  "Estimates the number of rows in the dataset at filepath."
+(defn- pad-8
+  ^long [^long n]
+  (let [padding (rem n 8)]
+    (if (zero? padding)
+      n
+      (+ n (- 8 padding)))))
+
+(defn- read-fully?
+  [^FileChannel channel ^ByteBuffer buffer]
+  (loop [read-any? false]
+    (if (.hasRemaining buffer)
+      (let [n (.read channel buffer)]
+        (cond
+          (pos? n) (recur true)
+          (and (neg? n) read-any?) (throw (java.io.EOFException. "Unexpected EOF in Arrow metadata"))
+          (neg? n) false
+          :else (recur read-any?)))
+      true)))
+
+(defn- read-int-le
+  [^FileChannel channel]
+  (let [buffer (doto (ByteBuffer/allocate 4)
+                 (.order ByteOrder/LITTLE_ENDIAN))]
+    (when (read-fully? channel buffer)
+      (.flip buffer)
+      (.getInt buffer))))
+
+(defn- read-arrow-message-size
+  [^FileChannel channel]
+  (when-let [size (read-int-le channel)]
+    (if (= -1 size)
+      (read-int-le channel)
+      size)))
+
+(defn- arrow-file?
+  [^bytes prefix]
+  (and (= 65 (aget prefix 0))
+       (= 82 (aget prefix 1))
+       (= 82 (aget prefix 2))
+       (= 79 (aget prefix 3))
+       (= 87 (aget prefix 4))
+       (= 49 (aget prefix 5))
+       (zero? (aget prefix 6))
+       (zero? (aget prefix 7))))
+
+(defn- arrow-metadata-row-count
+  "Counts Arrow record-batch rows from IPC metadata while seeking over bodies."
+  [filepath]
+  (try
+    (with-open [raf (RandomAccessFile. filepath "r")]
+      (let [channel (.getChannel raf)
+            prefix (ByteBuffer/allocate 8)]
+        (when (read-fully? channel prefix)
+          (if (arrow-file? (.array prefix))
+            (.position channel 8)
+            (.position channel 0))
+          (loop [rows (long 0)]
+            (if-let [message-size (read-arrow-message-size channel)]
+              (if (zero? message-size)
+                rows
+                (let [metadata-size (pad-8 message-size)
+                      metadata (doto (ByteBuffer/allocate (int metadata-size))
+                                 (.order ByteOrder/LITTLE_ENDIAN))
+                      _ (read-fully? channel metadata)
+                      _ (.flip metadata)
+                      message-buffer (doto (.duplicate metadata)
+                                       (.limit (int message-size)))
+                      message (Message/getRootAsMessage message-buffer)
+                      body-length (long (.bodyLength message))
+                      rows (if (= MessageHeader/RecordBatch (.headerType message))
+                             (+ rows
+                                (long (.length ^RecordBatch
+                                               (.header message (RecordBatch.)))))
+                             rows)]
+                  (.position channel (+ (.position channel) (pad-8 body-length)))
+                  (recur rows)))
+              rows)))))
+    (catch Exception _
+      nil)))
+
+(defn- scan-size
   [filepath]
   (let [stats (dsr/aggregate {"n" (dsr/row-count)} (persist/read-dataset-seq filepath))]
     (first (get stats "n"))))
+
+(defn estimate-size
+  "Estimates the number of rows in the dataset at filepath."
+  [filepath]
+  (or (when (#{:arrow :arrows} (persist/filename->format filepath))
+        (arrow-metadata-row-count filepath))
+      (scan-size filepath)))
 
 
 (defn column-names
@@ -223,32 +313,33 @@
     (ds/->dataset rows)))
 
 
+(def ^:private byte-array-class (Class/forName "[B"))
+(def ^:private short-array-class (Class/forName "[S"))
+(def ^:private int-array-class (Class/forName "[I"))
+
 (defn- assignment-at
   "Gets the assignment index from a polymorphic array (byte/short/int).
    Handles unsigned conversion for byte and short types."
   ^long [arr ^long i]
   (cond
-    (instance? (Class/forName "[B") arr)
+    (instance? byte-array-class arr)
     (Byte/toUnsignedInt (aget ^bytes arr (int i)))
 
-    (instance? (Class/forName "[S") arr)
+    (instance? short-array-class arr)
     (Short/toUnsignedInt (aget ^shorts arr (int i)))
 
     :else
     (aget ^ints arr (int i))))
 
 
-(defn- accumulate-chunk!
-  "Given a chunk's raw point data (float array, row-major [n, dims]) and
-   assignment indices (byte/short/int array), accumulate into centroid-sums
-   (double array for precision) and centroid-counts arrays."
-  [^floats points-arr assignments-arr ^doubles centroid-sums ^ints centroid-counts
+(defn- accumulate-byte-assignments!
+  [^floats points-arr ^bytes assignments-arr ^doubles centroid-sums ^ints centroid-counts
    n dims]
   (let [n (int n)
         dims (int dims)]
     (clojure.core/loop [i (int 0)]
       (when (< i n)
-        (let [c (int (assignment-at assignments-arr i))
+        (let [c (int (Byte/toUnsignedInt (aget assignments-arr i)))
               p-offset (int (* i dims))
               c-offset (int (* c dims))]
           (clojure.core/loop [d (int 0)]
@@ -260,6 +351,69 @@
               (recur (unchecked-inc-int d))))
           (aset centroid-counts c (int (inc (aget centroid-counts c)))))
         (recur (unchecked-inc-int i))))))
+
+
+(defn- accumulate-short-assignments!
+  [^floats points-arr ^shorts assignments-arr ^doubles centroid-sums ^ints centroid-counts
+   n dims]
+  (let [n (int n)
+        dims (int dims)]
+    (clojure.core/loop [i (int 0)]
+      (when (< i n)
+        (let [c (int (Short/toUnsignedInt (aget assignments-arr i)))
+              p-offset (int (* i dims))
+              c-offset (int (* c dims))]
+          (clojure.core/loop [d (int 0)]
+            (when (< d dims)
+              (let [idx (int (+ c-offset d))]
+                (aset centroid-sums idx
+                      (+ (aget centroid-sums idx)
+                         (double (aget points-arr (int (+ p-offset d)))))))
+              (recur (unchecked-inc-int d))))
+          (aset centroid-counts c (int (inc (aget centroid-counts c)))))
+        (recur (unchecked-inc-int i))))))
+
+
+(defn- accumulate-int-assignments!
+  [^floats points-arr ^ints assignments-arr ^doubles centroid-sums ^ints centroid-counts
+   n dims]
+  (let [n (int n)
+        dims (int dims)]
+    (clojure.core/loop [i (int 0)]
+      (when (< i n)
+        (let [c (int (aget assignments-arr i))
+              p-offset (int (* i dims))
+              c-offset (int (* c dims))]
+          (clojure.core/loop [d (int 0)]
+            (when (< d dims)
+              (let [idx (int (+ c-offset d))]
+                (aset centroid-sums idx
+                      (+ (aget centroid-sums idx)
+                         (double (aget points-arr (int (+ p-offset d)))))))
+              (recur (unchecked-inc-int d))))
+          (aset centroid-counts c (int (inc (aget centroid-counts c)))))
+        (recur (unchecked-inc-int i))))))
+
+
+(defn- accumulate-chunk!
+  "Given a chunk's raw point data (float array, row-major [n, dims]) and
+   assignment indices (byte/short/int array), accumulate into centroid-sums
+   (double array for precision) and centroid-counts arrays."
+  [^floats points-arr assignments-arr ^doubles centroid-sums ^ints centroid-counts
+   n dims]
+  (cond
+    (instance? byte-array-class assignments-arr)
+    (accumulate-byte-assignments! points-arr assignments-arr centroid-sums centroid-counts n dims)
+
+    (instance? short-array-class assignments-arr)
+    (accumulate-short-assignments! points-arr assignments-arr centroid-sums centroid-counts n dims)
+
+    (instance? int-array-class assignments-arr)
+    (accumulate-int-assignments! points-arr assignments-arr centroid-sums centroid-counts n dims)
+
+    :else
+    (throw (IllegalArgumentException.
+            (str "Unsupported assignments array type: " (class assignments-arr))))))
 
 
 (defn- compute-centroids-from-sums
@@ -296,6 +450,125 @@
           (recur (inc d) (+ dist (* diff diff))))))))
 
 
+(defn- point-manhattan-distance
+  [^floats points-arr ^floats centroid-arr p-offset c-offset dims]
+  (loop [d (long 0)
+         dist (double 0.0)]
+    (if (>= d dims)
+      dist
+      (let [diff (- (double (aget points-arr (int (+ p-offset d))))
+                    (double (aget centroid-arr (int (+ c-offset d)))))]
+        (recur (inc d) (+ dist (Math/abs diff)))))))
+
+
+(defn- point-chebyshev-distance
+  [^floats points-arr ^floats centroid-arr p-offset c-offset dims]
+  (loop [d (long 0)
+         dist (double 0.0)]
+    (if (>= d dims)
+      dist
+      (let [diff (- (double (aget points-arr (int (+ p-offset d))))
+                    (double (aget centroid-arr (int (+ c-offset d)))))]
+        (recur (inc d) (Math/max dist (Math/abs diff)))))))
+
+
+(defn- point-emd-distance
+  [^floats points-arr ^floats centroid-arr p-offset c-offset dims]
+  (loop [d (long 0)
+         last-distance (double 0.0)
+         total-distance (double 0.0)]
+    (if (>= d dims)
+      total-distance
+      (let [current-distance (- (+ (double (aget points-arr (int (+ p-offset d))))
+                                  last-distance)
+                                (double (aget centroid-arr (int (+ c-offset d)))))]
+        (recur (inc d)
+               current-distance
+               (+ total-distance (Math/abs current-distance)))))))
+
+
+(defn- point-distance-via-fn
+  [distance-fn ^floats points-arr ^floats centroid-arr p-offset c-offset dims]
+  (let [point (double-array dims)
+        centroid (double-array dims)]
+    (dotimes [d dims]
+      (aset point d (double (aget points-arr (int (+ p-offset d)))))
+      (aset centroid d (double (aget centroid-arr (int (+ c-offset d))))))
+    (double (distance-fn point centroid))))
+
+
+(defn- point-distance
+  [distance-key distance-fn ^floats points-arr ^floats centroid-arr
+   p-offset c-offset dims]
+  (case distance-key
+    :euclidean-sq (point-squared-distance points-arr centroid-arr p-offset c-offset dims)
+    :euclidean (Math/sqrt (point-squared-distance points-arr centroid-arr p-offset c-offset dims))
+    :manhattan (point-manhattan-distance points-arr centroid-arr p-offset c-offset dims)
+    :chebyshev (point-chebyshev-distance points-arr centroid-arr p-offset c-offset dims)
+    :emd (point-emd-distance points-arr centroid-arr p-offset c-offset dims)
+    (point-distance-via-fn distance-fn points-arr centroid-arr p-offset c-offset dims)))
+
+
+(defn- chunk-inertia-byte-assignments
+  [distance-key distance-fn ^floats points-arr ^bytes assignments-arr
+   ^floats centroid-arr n dims]
+  (loop [i (long 0)
+         chunk-cost (double 0.0)]
+    (if (>= i n)
+      chunk-cost
+      (let [c (int (Byte/toUnsignedInt (aget assignments-arr (int i))))
+            p-off (* i dims)
+            c-off (* (long c) dims)
+            point-dist (point-distance distance-key distance-fn points-arr centroid-arr p-off c-off dims)]
+        (recur (inc i) (+ chunk-cost point-dist))))))
+
+
+(defn- chunk-inertia-short-assignments
+  [distance-key distance-fn ^floats points-arr ^shorts assignments-arr
+   ^floats centroid-arr n dims]
+  (loop [i (long 0)
+         chunk-cost (double 0.0)]
+    (if (>= i n)
+      chunk-cost
+      (let [c (int (Short/toUnsignedInt (aget assignments-arr (int i))))
+            p-off (* i dims)
+            c-off (* (long c) dims)
+            point-dist (point-distance distance-key distance-fn points-arr centroid-arr p-off c-off dims)]
+        (recur (inc i) (+ chunk-cost point-dist))))))
+
+
+(defn- chunk-inertia-int-assignments
+  [distance-key distance-fn ^floats points-arr ^ints assignments-arr
+   ^floats centroid-arr n dims]
+  (loop [i (long 0)
+         chunk-cost (double 0.0)]
+    (if (>= i n)
+      chunk-cost
+      (let [c (int (aget assignments-arr (int i)))
+            p-off (* i dims)
+            c-off (* (long c) dims)
+            point-dist (point-distance distance-key distance-fn points-arr centroid-arr p-off c-off dims)]
+        (recur (inc i) (+ chunk-cost point-dist))))))
+
+
+(defn- chunk-inertia
+  [distance-key distance-fn ^floats points-arr assignments-arr
+   ^floats centroid-arr n dims]
+  (cond
+    (instance? byte-array-class assignments-arr)
+    (chunk-inertia-byte-assignments distance-key distance-fn points-arr assignments-arr centroid-arr n dims)
+
+    (instance? short-array-class assignments-arr)
+    (chunk-inertia-short-assignments distance-key distance-fn points-arr assignments-arr centroid-arr n dims)
+
+    (instance? int-array-class assignments-arr)
+    (chunk-inertia-int-assignments distance-key distance-fn points-arr assignments-arr centroid-arr n dims)
+
+    :else
+    (throw (IllegalArgumentException.
+            (str "Unsupported assignments array type: " (class assignments-arr))))))
+
+
 (defn- centroids-converged?
   "Checks if centroids have converged using mean relative squared shift.
    Returns true when the average (shift/value)² across coordinates is below tol."
@@ -329,10 +602,13 @@
 (defn- lloyd-fast-iteration
   "Runs one Lloyd iteration: GPU fused assign + CPU accumulation.
    Returns [new-centroid-arr inertia]."
-  [chunks ^floats centroid-arr ^long k ^long dims]
-  (let [centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
+  [chunks ^floats centroid-arr k dims distance-key]
+  (let [k (long k)
+        dims (long dims)
+        centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
         _ (distances/write-centroids-buffer! distances/gpu-context centroid-matrix)
         ctx @distances/gpu-context
+        distance-fn (distances/get-distance-fn distance-key)
         sums (double-array (* k dims))
         counts (int-array k)
         inertia-acc (atom 0.0)]
@@ -341,15 +617,8 @@
             n (long n)
             dims-i (long dims)]
         (accumulate-chunk! points-arr assignments-arr sums counts n dims-i)
-        ;; Compute inertia contribution
-        (clojure.core/loop [i (long 0) chunk-cost (double 0.0)]
-          (if (>= i n)
-            (swap! inertia-acc + chunk-cost)
-            (let [c (int (assignment-at assignments-arr i))
-                  p-off (* i dims-i)
-                  c-off (* (long c) dims-i)
-                  point-dist (double (point-squared-distance points-arr centroid-arr p-off c-off dims-i))]
-              (recur (inc i) (+ chunk-cost point-dist)))))))
+        (swap! inertia-acc + (chunk-inertia distance-key distance-fn points-arr assignments-arr
+                                            centroid-arr n dims-i))))
     (distances/release-centroids-buffer! distances/gpu-context)
     (let [^floats new-arr (compute-centroids-from-sums sums counts k dims)]
       ;; Fill empty clusters from old centroids
@@ -379,7 +648,7 @@
             (if (>= iteration max-iterations)
               (do (pr/print (pr/done (pr/tick progress-bar iteration)))
                   [centroid-arr prev-inertia])
-              (let [iteration-result (lloyd-fast-iteration chunks centroid-arr k dims)
+              (let [iteration-result (lloyd-fast-iteration chunks centroid-arr k dims (:distance-key conf))
                     ^floats new-arr (nth iteration-result 0)
                     new-inertia (double (nth iteration-result 1))
                     rel-change (/ (Math/abs (- prev-inertia new-inertia))
