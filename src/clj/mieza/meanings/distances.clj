@@ -107,9 +107,11 @@
 
 (defn dataset->matrix
   ([conf ds]
-   (-> ds
-       (ds/select-columns (:col-names conf))
-       (dataset->dense :row :float32)))
+   (let [col-names (:col-names conf)
+         ds (if (= (vec col-names) (vec (ds/column-names ds)))
+              ds
+              (ds/select-columns ds col-names))]
+     (dataset->dense ds :row :float32)))
   ([ds] 
    (dataset->dense ds :row :float32)))
 
