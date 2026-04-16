@@ -20,6 +20,7 @@
    [clojure.spec.alpha :as s]
    [fastmath.core]
    [ham-fisted.lazy-noncaching :as hfln]
+   [mieza.meanings.advise :as advise]
    [mieza.meanings.distances :as distances]
    [mieza.meanings.initializations.core :refer [initialize-centroids]]
    [mieza.meanings.initializations.utils
@@ -129,10 +130,18 @@
   :args (s/cat :conf :mieza.meanings.specs/configuration
                :clusters :mieza.meanings.specs/dataset))
 (defn q-of-x!
-  "Computes and saves the q(x) distribution for all x in the dataset."
+  "Computes and saves the q(x) distribution for all x in the dataset.
+   After writing qx.arrow, hints the kernel to drop :points (river) pages
+   from the page cache — sampling only reads qx.arrow, so the ~86 GB of
+   river mmap pages accumulated during qx-denominator + q-of-x passes
+   can be evicted to make room for qx.arrow to stay resident."
   ([conf cluster]
    (p/write-datasets (qx-file conf)
-                     (q-of-x conf cluster (qx-denominator conf (distances/dataset->matrix conf cluster))))))
+                     (q-of-x conf cluster (qx-denominator conf (distances/dataset->matrix conf cluster))))
+   (try (advise/dontneed! (:points conf))
+        (catch Throwable t
+          (log/warn t "page-cache drop hint failed for :points"
+                    {:path (:points conf)})))))
 
 
 (s/fdef mcmc-sample
