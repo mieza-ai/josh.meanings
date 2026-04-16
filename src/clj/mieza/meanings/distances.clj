@@ -751,15 +751,21 @@
 
 (defn minimum-distance
   [conf ds centroid-ds]
-  (let [ds-matrix (dataset->matrix conf ds) 
+  (let [ds-matrix (dataset->matrix conf ds)
         row-count (ds/row-count ds)
         centroid-matrix (dataset->matrix conf centroid-ds)
-        col-count (ds/row-count centroid-ds) 
-        distances (fge row-count col-count (gpu-distance @gpu-context ds-matrix centroid-matrix) {:layout :row})]
-    (fv (hfln/map (fn [m] (entry m (imin m))) (rows distances)))))
+        col-count (ds/row-count centroid-ds)
+        distances (fge row-count col-count (gpu-distance @gpu-context ds-matrix centroid-matrix) {:layout :row})
+        result (fv (hfln/map (fn [m] (entry m (imin m))) (rows distances)))]
+    (clojurecl/release ds-matrix)
+    (clojurecl/release centroid-matrix)
+    (clojurecl/release distances)
+    result))
 
 
 (defn minimum-index
   [conf ds]
-  (let [ds-matrix (dataset->matrix conf ds)]
-    (gpu-distance-min-index @gpu-context ds-matrix)))
+  (let [ds-matrix (dataset->matrix conf ds)
+        result (gpu-distance-min-index @gpu-context ds-matrix)]
+    (clojurecl/release ds-matrix)
+    result))

@@ -14,6 +14,7 @@
             [tech.v3.dataset :as ds]
             [tech.v3.dataset.neanderthal :as ds-nean]
             [tech.v3.datatype.functional :as dfn]
+            [uncomplicate.commons.core :as uc]
             [uncomplicate.neanderthal
              [random :refer [rand-uniform!]]
              [native :as native]]
@@ -111,8 +112,11 @@
 ;; 8. Test version which does full res-rank calculation in neanderthal.
 (defn reservoir-rank
   [dataset column-name]
-  (let [rand-dataset (ds/rename-columns (ds-nean/dense->dataset (generate-random-buffer dataset)) [:random])]
-    (assoc dataset :res-rank (dfn/pow (rand-dataset :random) (dfn// 1 (dataset column-name))))))
+  (let [rand-buf (generate-random-buffer dataset)
+        rand-dataset (ds/rename-columns (ds-nean/dense->dataset rand-buf) [:random])
+        result (assoc dataset :res-rank (dfn/pow (rand-dataset :random) (dfn// 1 (dataset column-name))))]
+    (uc/release rand-buf)
+    result))
 
 
 (defn weighted-sample

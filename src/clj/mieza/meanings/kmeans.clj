@@ -31,6 +31,7 @@
             [progrock.core :as pr]
             [tech.v3.dataset :as ds]
             [tech.v3.dataset.reductions :as dsr]
+            [uncomplicate.commons.core :as uc]
             [uncomplicate.neanderthal.core :as ne]
             [uncomplicate.neanderthal.native :as ne-native]
             [taoensso.timbre :as log]
@@ -595,23 +596,12 @@
           (recur (unchecked-inc-int i) (+ shift (* d d))))))))
 
 
-(defn- preload-chunks
-  "Preloads dataset chunks as [matrix float-array n] triples.
-   Keeps Neanderthal matrices for GPU and raw float arrays for CPU accumulation."
-  [^KMeansState conf]
-  (doall
-   (map (fn [ds]
-          (let [matrix (distances/dataset->matrix conf ds)
-                n (ne/mrows matrix)
-                points-arr (distances/matrix->float-array matrix)]
-            [matrix points-arr n]))
-        (persist/read-dataset-seq conf :points))))
-
-
 (defn- lloyd-fast-iteration
   "Runs one Lloyd iteration: GPU fused assign + CPU accumulation.
+   Streams chunks from disk via mmap, releasing each Neanderthal matrix
+   immediately after use to prevent native memory accumulation.
    Returns [new-centroid-arr inertia]."
-  [chunks ^floats centroid-arr k dims distance-key]
+  [^KMeansState conf ^floats centroid-arr k dims distance-key]
   (let [k (long k)
         dims (long dims)
         centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
@@ -621,13 +611,17 @@
         sums (double-array (* k dims))
         counts (int-array k)
         inertia-acc (atom 0.0)]
-    (doseq [[matrix points-arr n] chunks]
-      (let [assignments-arr (distances/gpu-fused-assign ctx matrix)
-            n (long n)
+    (doseq [ds (persist/read-dataset-seq conf :points)]
+      (let [matrix (distances/dataset->matrix conf ds)
+            n (long (ne/mrows matrix))
+            assignments-arr (distances/gpu-fused-assign ctx matrix)
+            points-arr (distances/matrix->float-array matrix)
+            _ (uc/release matrix)
             dims-i (long dims)]
         (accumulate-chunk! points-arr assignments-arr sums counts n dims-i)
         (swap! inertia-acc + (chunk-inertia distance-key distance-fn points-arr assignments-arr
                                             centroid-arr n dims-i))))
+    (uc/release centroid-matrix)
     (distances/release-centroids-buffer! distances/gpu-context)
     (let [^floats new-arr (compute-centroids-from-sums sums counts k dims)]
       ;; Fill empty clusters from old centroids
@@ -849,7 +843,6 @@
                                  :dims dims
                                  :distance-key (:distance-key conf)
                                  :dataset-path (:points conf)})))
-          chunks (preload-chunks conf)
           [final-arr final-inertia _]
           (loop [^floats centroid-arr initial-arr
                  iteration start-iteration
@@ -860,7 +853,7 @@
               (do (pr/print (pr/done (pr/tick progress-bar iteration)))
                   (write-checkpoint last-completed-iteration centroid-arr prev-inertia true)
                   [centroid-arr prev-inertia last-completed-iteration])
-              (let [iteration-result (lloyd-fast-iteration chunks centroid-arr k dims (:distance-key conf))
+              (let [iteration-result (lloyd-fast-iteration conf centroid-arr k dims (:distance-key conf))
                     ^floats new-arr (nth iteration-result 0)
                     new-inertia (double (nth iteration-result 1))
                     rel-change (/ (Math/abs (- prev-inertia new-inertia))
