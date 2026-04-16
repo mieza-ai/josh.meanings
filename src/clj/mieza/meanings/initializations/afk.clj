@@ -152,7 +152,8 @@
         d2        (vm/pow min-dists 2)
         qx-vec    (fv (get points qx-column-name))
         w         (vm/div d2 qx-vec)
-        rands     (ne/view-vctr (utils/generate-random-buffer points))
+        rand-buf  (utils/generate-random-buffer points)
+        rands     (ne/view-vctr rand-buf)
         cluster-index (reduce
                        (fn [^long acc-index ^long index]
                          (let [acc  (ne/entry w acc-index)
@@ -169,6 +170,7 @@
     (uc/release d2)
     (uc/release qx-vec)
     (uc/release w)
+    (uc/release rand-buf)
     result))
 
 
