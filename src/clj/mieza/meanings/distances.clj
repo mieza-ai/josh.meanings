@@ -31,9 +31,7 @@
    - :chebyshev
    - :euclidean-sq
    "
-  (:refer-clojure
-   :exclude
-   [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-])
+  (:refer-clojure :exclude [assoc defn fn let])
   (:require
    [clj-fast.clojure.core :refer [assoc defn fn let]]
    [clojure.core :as c]
@@ -44,11 +42,11 @@
    [mieza.meanings.persistence :as p]
    [tech.v3.dataset :as ds]
    [tech.v3.dataset.neanderthal :refer [dataset->dense]]
-   [uncomplicate.clojurecl
-             [core :as cl :refer :all]
-             [info :refer :all]]
-   [uncomplicate.clojurecl.core :refer :all]
-   [uncomplicate.clojurecl.info :refer :all]
+   [uncomplicate.clojurecl.core :refer [build-program! cl-buffer command-queue
+                                        context devices enq-kernel! enq-read!
+                                        enq-write! finish! kernel platforms
+                                        program-with-source set-args! work-size]]
+   [uncomplicate.clojurecl.info :refer [build-log]]
    [uncomplicate.commons
              [core :as clojurecl :refer [with-release]]
              [utils :refer [direct-buffer]]]
@@ -659,7 +657,7 @@
         sums (double-array sum-count)
         counts (int-array num-clusters)]
     (c/loop [block (long 0)
-             inertia (double 0.0)]
+             inertia 0.0]
       (if (>= block block-count)
         {:sums sums
          :counts counts

@@ -13,9 +13,7 @@
    in practice computing the first D^2 sampling distribution ends up paying 
    for itself by reducing the chain length necessary to get convergence 
    guarantees."
-  (:refer-clojure
-   :exclude
-   [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-])
+  (:refer-clojure :exclude [assoc defn defn- fn get let loop])
   (:require
    [clojure.spec.alpha :as s]
    [fastmath.core]
@@ -37,7 +35,7 @@
    [uncomplicate.neanderthal.vect-math :as vm]
    [clojure.core :as c]
    [babashka.fs :as fs]
-   [clj-fast.clojure.core :refer [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-]]))
+   [clj-fast.clojure.core :refer [assoc defn defn- fn get let loop]]))
 
 
 

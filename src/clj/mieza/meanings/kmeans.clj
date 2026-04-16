@@ -9,20 +9,23 @@
 	 that result, in terms of inter-cluster and intracluster distances and 
 	 cohesion. As a result k means is best run multiple times in order to 
 	 avoid the trap of a local minimum."
-  (:refer-clojure
-   :exclude
-   [get nth assoc get-in merge assoc-in update update-in select-keys destructure let fn loop defn defn-])
+  (:refer-clojure :exclude [assoc defn defn- fn get let loop merge nth])
   (:require [clojure.spec.alpha :as s]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string]
             [ham-fisted.lazy-noncaching :as hfln]
             [mieza.meanings.distances :as distances]
-            [mieza.meanings.initializations
-             [mc2 :as init-mc2]
-             [afk :as init-afk]
-             [plusplus :as init-plusplus]
-             [parallel :as init-parallel]]
+            ;; The four init namespaces register defmethods on
+            ;; initialize-centroids; they are loaded for that side effect.
+            ^{:clj-kondo/ignore [:unused-namespace]}
+            [mieza.meanings.initializations.mc2]
+            ^{:clj-kondo/ignore [:unused-namespace]}
+            [mieza.meanings.initializations.afk]
+            ^{:clj-kondo/ignore [:unused-namespace]}
+            [mieza.meanings.initializations.plusplus]
+            ^{:clj-kondo/ignore [:unused-namespace]}
+            [mieza.meanings.initializations.parallel]
             [mieza.meanings.initializations.core :refer [initialize-centroids]]
             [mieza.meanings.persistence :as persist]
             [mieza.meanings.protocols.classifier :refer [assignments Classifier]]
@@ -35,7 +38,7 @@
             [uncomplicate.neanderthal.core :as ne]
             [uncomplicate.neanderthal.native :as ne-native]
             [taoensso.timbre :as log]
-            [clj-fast.clojure.core :refer [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-]])
+            [clj-fast.clojure.core :refer [assoc defn defn- fn get let loop merge nth]])
   (:import [mieza.meanings.records.cluster_result ClusterResult]
            [mieza.meanings.records.clustering_state KMeansState]
            [java.io RandomAccessFile]
@@ -327,21 +330,6 @@
 (def ^:private short-array-class (Class/forName "[S"))
 (def ^:private int-array-class (Class/forName "[I"))
 
-(defn- assignment-at
-  "Gets the assignment index from a polymorphic array (byte/short/int).
-   Handles unsigned conversion for byte and short types."
-  ^long [arr ^long i]
-  (cond
-    (instance? byte-array-class arr)
-    (Byte/toUnsignedInt (aget ^bytes arr (int i)))
-
-    (instance? short-array-class arr)
-    (Short/toUnsignedInt (aget ^shorts arr (int i)))
-
-    :else
-    (aget ^ints arr (int i))))
-
-
 (defn- accumulate-byte-assignments!
   [^floats points-arr ^bytes assignments-arr ^doubles centroid-sums ^ints centroid-counts
    n dims]
@@ -452,7 +440,7 @@
         c-offset (long c-offset)
         dims (long dims)]
     (loop [d (long 0)
-           dist (double 0.0)]
+           dist 0.0]
       (if (>= d dims)
         dist
         (let [diff (- (double (aget points-arr (int (+ p-offset d))))
@@ -463,7 +451,7 @@
 (defn- point-manhattan-distance
   [^floats points-arr ^floats centroid-arr p-offset c-offset dims]
   (loop [d (long 0)
-         dist (double 0.0)]
+         dist 0.0]
     (if (>= d dims)
       dist
       (let [diff (- (double (aget points-arr (int (+ p-offset d))))
@@ -474,7 +462,7 @@
 (defn- point-chebyshev-distance
   [^floats points-arr ^floats centroid-arr p-offset c-offset dims]
   (loop [d (long 0)
-         dist (double 0.0)]
+         dist 0.0]
     (if (>= d dims)
       dist
       (let [diff (- (double (aget points-arr (int (+ p-offset d))))
@@ -485,8 +473,8 @@
 (defn- point-emd-distance
   [^floats points-arr ^floats centroid-arr p-offset c-offset dims]
   (loop [d (long 0)
-         last-distance (double 0.0)
-         total-distance (double 0.0)]
+         last-distance 0.0
+         total-distance 0.0]
     (if (>= d dims)
       total-distance
       (let [current-distance (- (+ (double (aget points-arr (int (+ p-offset d))))
@@ -523,7 +511,7 @@
   [distance-key distance-fn ^floats points-arr ^bytes assignments-arr
    ^floats centroid-arr n dims]
   (loop [i (long 0)
-         chunk-cost (double 0.0)]
+         chunk-cost 0.0]
     (if (>= i n)
       chunk-cost
       (let [c (int (Byte/toUnsignedInt (aget assignments-arr (int i))))
@@ -537,7 +525,7 @@
   [distance-key distance-fn ^floats points-arr ^shorts assignments-arr
    ^floats centroid-arr n dims]
   (loop [i (long 0)
-         chunk-cost (double 0.0)]
+         chunk-cost 0.0]
     (if (>= i n)
       chunk-cost
       (let [c (int (Short/toUnsignedInt (aget assignments-arr (int i))))
@@ -551,7 +539,7 @@
   [distance-key distance-fn ^floats points-arr ^ints assignments-arr
    ^floats centroid-arr n dims]
   (loop [i (long 0)
-         chunk-cost (double 0.0)]
+         chunk-cost 0.0]
     (if (>= i n)
       chunk-cost
       (let [c (int (aget assignments-arr (int i)))
@@ -579,23 +567,6 @@
             (str "Unsupported assignments array type: " (class assignments-arr))))))
 
 
-(defn- centroids-converged?
-  "Checks if centroids have converged using mean relative squared shift.
-   Returns true when the average (shift/value)² across coordinates is below tol."
-  [^floats old-arr ^floats new-arr ^double tol]
-  (let [len (alength old-arr)
-        inv-len (/ 1.0 (double len))]
-    (clojure.core/loop [i (int 0)
-                        shift (double 0.0)]
-      (if (>= i len)
-        (< (* shift inv-len) tol)
-        (let [o (double (aget old-arr i))
-              n (double (aget new-arr i))
-              scale (Math/max (Math/abs o) 1.0)
-              d (/ (- n o) scale)]
-          (recur (unchecked-inc-int i) (+ shift (* d d))))))))
-
-
 (defn- lloyd-fast-iteration
   "Runs one Lloyd iteration: GPU fused assign + CPU accumulation.
    Streams chunks from disk via mmap, releasing each Neanderthal matrix
@@ -616,11 +587,10 @@
             n (long (ne/mrows matrix))
             assignments-arr (distances/gpu-fused-assign ctx matrix)
             points-arr (distances/matrix->float-array matrix)
-            _ (uc/release matrix)
-            dims-i (long dims)]
-        (accumulate-chunk! points-arr assignments-arr sums counts n dims-i)
+            _ (uc/release matrix)]
+        (accumulate-chunk! points-arr assignments-arr sums counts n dims)
         (swap! inertia-acc + (chunk-inertia distance-key distance-fn points-arr assignments-arr
-                                            centroid-arr n dims-i))))
+                                            centroid-arr n dims))))
     (uc/release centroid-matrix)
     (distances/release-centroids-buffer! distances/gpu-context)
     (let [^floats new-arr (compute-centroids-from-sums sums counts k dims)]
@@ -721,7 +691,7 @@
 
       (and (contains? checkpoint :dataset-path)
            (not= (str (:points conf)) (:dataset-path checkpoint)))
-      (conj (str ":dataset-path expected " (str (:points conf))
+      (conj (str ":dataset-path expected " (:points conf)
                  ", found " (:dataset-path checkpoint)))
 
       (not (number? (:iteration checkpoint)))

@@ -1,15 +1,13 @@
 (ns mieza.meanings.initializations.utils
   "Utilities to help with rapid k mean cluster initialization."
-  (:refer-clojure
-   :exclude
-   [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-])
-  (:use [mieza.meanings.specs])
+  (:refer-clojure :exclude [assoc defn fn get let])
   (:require [bigml.sampling.reservoir :as res-sample]
             [clojure.spec.alpha :as s]
             [ham-fisted.reduce :as hamfr]
             [ham-fisted.lazy-noncaching :as hfl]
             [mieza.meanings.persistence :as p]
             [mieza.meanings.records.clustering-state]
+            [mieza.meanings.specs]
             [taoensso.timbre :as log]
             [tech.v3.dataset :as ds]
             [tech.v3.dataset.neanderthal :as ds-nean]
@@ -18,10 +16,9 @@
             [uncomplicate.neanderthal
              [random :refer [rand-uniform!]]
              [native :as native]]
-            [uncomplicate.neanderthal.vect-math :as vm]
             [ham-fisted.api :as hamf]
             [clojure.core :as c]
-            [clj-fast.clojure.core :refer [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-]])
+            [clj-fast.clojure.core :refer [assoc defn fn get let]])
   (:import [mieza.meanings.records.clustering_state KMeansState]))
 
 
@@ -77,7 +74,7 @@
 (def reservoir-sampling-max-heap-comparator
   (reify java.util.Comparator
     (compare
-     [this item1 item2]
+     [_this item1 item2]
      (compare (get item2 :res-rank)  (get item1 :res-rank)))))
 
 

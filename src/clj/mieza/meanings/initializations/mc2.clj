@@ -17,9 +17,8 @@
    [mieza.meanings.persistence :as p]
    [mieza.meanings.initializations.utils :refer [centroids->dataset uniform-sample add-default-chain-length]]
    [clojure.spec.alpha :as s]
-   [tech.v3.dataset :as ds])
-  (:use
-   [mieza.meanings.initializations.core]))
+   [tech.v3.dataset :as ds]
+   [mieza.meanings.initializations.core :refer [initialize-centroids]]))
 
 
 (def t-dataset :mieza.meanings.specs/dataset)
@@ -63,7 +62,7 @@
 (s/fdef mcmc-sample :args (s/cat :distance-fn ifn? :c t-point :rsp t-points) :ret t-points)
 (defn- mcmc-sample
   "Perform markov chain monte carlo sampling to approximate D^2 sampling"
-  [weight-fn c rsp]
+  [weight-fn _c rsp]
 
   ;; Not special casing first selection because it simplifies the 
   ;; inner loop code so that we're doing the same thing each time 
