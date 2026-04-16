@@ -125,6 +125,11 @@
     (.get ^org.bytedeco.javacpp.FloatPointer ptr arr)
     arr))
 
+(c/defn- float-pointer-byte-buffer
+  "Returns a direct ByteBuffer view over a JavaCPP FloatPointer without copying."
+  ^java.nio.ByteBuffer [^FloatPointer ptr]
+  (.asByteBuffer ptr))
+
 
 ;; GPU based distance functions need to work a little differently.  For CPU 
 ;; functions we get the function and then we use the distance function during 
@@ -302,12 +307,9 @@
         cols (ncols centroids)
         cl-centroids (cl-buffer ctx (* k cols Float/BYTES) :read-only) 
         ^FloatPointer centroids-ptr (buffer centroids)
-        centroids-array (float-array (.capacity centroids-ptr))]
+        centroids-buffer (float-pointer-byte-buffer centroids-ptr)]
 
-    (.get centroids-ptr centroids-array)
-
-    (enq-write! cqueue cl-centroids centroids-array)
-
+    (enq-write! cqueue cl-centroids centroids-buffer)
     (swap! gpu-context assoc :cl-centroids cl-centroids)
     (swap! gpu-context assoc :k k)))
 
@@ -553,14 +555,11 @@
          _ (when-not (pos? local-size)
              (throw (IllegalArgumentException. "local-size must be positive")))
          global-size (long (round-up-to-multiple n local-size))
-         _ (when-not (zero? (rem global-size local-size))
-             (throw (IllegalStateException. "global-size must be divisible by local-size")))
          global-work-size [global-size]
          local-work-size [local-size]
          work-size (work-size global-work-size local-work-size)
          ^FloatPointer matrix-ptr (buffer matrix)
-         matrix-array (float-array (.capacity matrix-ptr))
-         _ (.get matrix-ptr matrix-array)
+         matrix-buffer (float-pointer-byte-buffer matrix-ptr)
          min-indices (create-min-index-result-array num-clusters n)
          cqueue (:cqueue device-context)
          cl-centroids (:cl-centroids device-context)]
@@ -569,7 +568,7 @@
                     cl-kernel (kernel (:fused-prog device-context) (:fused-kernel device-context))]
        (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
                   (int-array [1]) (int-array [n]) (int-array [num-clusters]))
-       (enq-write! cqueue cl-matrix matrix-array)
+       (enq-write! cqueue cl-matrix matrix-buffer)
        (enq-kernel! cqueue cl-kernel work-size)
        (enq-read! cqueue cl-assignments min-indices)
        (finish! cqueue)
