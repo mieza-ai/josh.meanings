@@ -13,6 +13,8 @@
    :exclude
    [get nth assoc get-in merge assoc-in update update-in select-keys destructure let fn loop defn defn-])
   (:require [clojure.spec.alpha :as s]
+            [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string]
             [ham-fisted.lazy-noncaching :as hfln]
             [mieza.meanings.distances :as distances]
@@ -31,9 +33,11 @@
             [tech.v3.dataset.reductions :as dsr]
             [uncomplicate.neanderthal.core :as ne]
             [uncomplicate.neanderthal.native :as ne-native]
+            [taoensso.timbre :as log]
             [clj-fast.clojure.core :refer [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-]])
   (:import [mieza.meanings.records.cluster_result ClusterResult]
-           [mieza.meanings.records.clustering_state KMeansState]))
+           [mieza.meanings.records.clustering_state KMeansState]
+           [java.nio.file CopyOption Files StandardCopyOption]))
 
 
 
@@ -70,7 +74,8 @@
 (defn initialize-k-means-state
   "Sets initial configuration options for the k means calculation."
   [points-file k options]
-  (let [{:keys [format init distance-key m fused-assign on-progress]} (merge default-options options)
+  (let [{:keys [format init distance-key m fused-assign on-progress
+                lloyd-checkpoint-path lloyd-checkpoint-every]} (merge default-options options)
         points-file (persist/convert-file points-file format)
         col-names (get options :columns (column-names points-file))
         state (assoc (->KMeansState
@@ -87,7 +92,9 @@
                       fused-assign)
                      :distance-fn (distances/get-distance-fn distance-key))]
     (cond-> state
-      on-progress (assoc :on-progress on-progress))))
+      on-progress (assoc :on-progress on-progress)
+      lloyd-checkpoint-path (assoc :lloyd-checkpoint-path lloyd-checkpoint-path)
+      lloyd-checkpoint-every (assoc :lloyd-checkpoint-every lloyd-checkpoint-every))))
 
 
 (defn assignments-api
@@ -359,6 +366,134 @@
       [new-arr @inertia-acc])))
 
 
+(def ^:private lloyd-checkpoint-schema-version 1)
+
+
+(defn- float-array->vector
+  [^floats arr]
+  (mapv float arr))
+
+
+(defn- checkpoint-centroids->float-array
+  ^floats [centroids]
+  (let [arr (float-array (count centroids))]
+    (doseq [[i value] (map-indexed vector centroids)]
+      (aset arr (int i) (float value)))
+    arr))
+
+
+(defn- same-long?
+  [expected actual]
+  (and (number? actual)
+       (= (long expected) (long actual))))
+
+
+(defn- checkpoint-due?
+  [^long iteration ^long checkpoint-every]
+  (== (long 0) (Long/remainderUnsigned iteration checkpoint-every)))
+
+
+(defn- write-lloyd-checkpoint!
+  "Atomically writes a Lloyd checkpoint as EDN. Centroids are serialized under
+   `:centroids` as a vector of float values in row-major [k, dims] order so the
+   read path can round-trip them without extra dependencies."
+  [path {:keys [iteration centroids inertia k dims distance-key dataset-path]}]
+  (let [target (.toPath (io/file path))
+        tmp (.resolveSibling target (str (.getFileName target) ".tmp"))
+        parent (.getParent target)
+        checkpoint {:schema-version lloyd-checkpoint-schema-version
+                    :iteration (long iteration)
+                    :centroids (float-array->vector centroids)
+                    :inertia (double inertia)
+                    :k (long k)
+                    :dims (long dims)
+                    :distance-key distance-key
+                    :dataset-path (str dataset-path)
+                    :written-at (java.util.Date.)}]
+    (when parent
+      (Files/createDirectories parent (make-array java.nio.file.attribute.FileAttribute 0)))
+    (spit (.toFile tmp) (pr-str checkpoint))
+    (Files/move tmp target
+                (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
+                                        StandardCopyOption/REPLACE_EXISTING]))
+    nil))
+
+
+(defn- read-lloyd-checkpoint
+  [path]
+  (let [checkpoint-file (io/file path)]
+    (when (.exists checkpoint-file)
+      (try
+        (let [checkpoint (edn/read-string (slurp checkpoint-file))]
+          (when (map? checkpoint)
+            checkpoint))
+        (catch Exception _
+          nil)))))
+
+
+(defn- lloyd-checkpoint-mismatches
+  [checkpoint ^KMeansState conf ^long k ^long dims]
+  (let [centroids (:centroids checkpoint)
+        expected-centroid-count (* k dims)
+        centroid-shape-valid? (and (sequential? centroids)
+                                   (= expected-centroid-count (count centroids)))
+        centroid-values-valid? (and centroid-shape-valid?
+                                    (every? number? centroids))]
+    (cond-> []
+      (not= lloyd-checkpoint-schema-version (:schema-version checkpoint))
+      (conj (str ":schema-version expected " lloyd-checkpoint-schema-version
+                 ", found " (:schema-version checkpoint)))
+
+      (not (same-long? k (:k checkpoint)))
+      (conj (str ":k expected " k ", found " (:k checkpoint)))
+
+      (not (same-long? dims (:dims checkpoint)))
+      (conj (str ":dims expected " dims ", found " (:dims checkpoint)))
+
+      (not= (:distance-key conf) (:distance-key checkpoint))
+      (conj (str ":distance-key expected " (:distance-key conf)
+                 ", found " (:distance-key checkpoint)))
+
+      (and (contains? checkpoint :dataset-path)
+           (not= (str (:points conf)) (:dataset-path checkpoint)))
+      (conj (str ":dataset-path expected " (str (:points conf))
+                 ", found " (:dataset-path checkpoint)))
+
+      (not (number? (:iteration checkpoint)))
+      (conj (str ":iteration expected number, found " (:iteration checkpoint)))
+
+      (not (number? (:inertia checkpoint)))
+      (conj (str ":inertia expected number, found " (:inertia checkpoint)))
+
+      (not centroid-shape-valid?)
+      (conj (str ":centroids expected " expected-centroid-count
+                 " values, found " (if (sequential? centroids)
+                                     (count centroids)
+                                     (type centroids))))
+
+      (and centroid-shape-valid? (not centroid-values-valid?))
+      (conj ":centroids contains non-numeric values"))))
+
+
+(defn- resume-lloyd-checkpoint
+  [path ^KMeansState conf ^long k ^long dims]
+  (when-let [checkpoint (read-lloyd-checkpoint path)]
+    (let [mismatches (lloyd-checkpoint-mismatches checkpoint conf k dims)]
+      (if (seq mismatches)
+        (do
+          (log/warn "Ignoring Lloyd checkpoint" path
+                    "because" (clojure.string/join "; " mismatches))
+          nil)
+        (let [checkpoint-iteration (long (:iteration checkpoint))
+              start-iteration (inc checkpoint-iteration)
+              prev-inertia (double (:inertia checkpoint))]
+          (log/info "Resuming Lloyd checkpoint" path
+                    "from completed iteration" checkpoint-iteration)
+          {:centroids (checkpoint-centroids->float-array (:centroids checkpoint))
+           :iteration start-iteration
+           :prev-inertia prev-inertia})))))
+
+
 (defn lloyd-fast
   "Fast Lloyd iteration using fused GPU assignment + Java array accumulation.
    Bypasses the dataset abstraction layer for centroid updates entirely."
@@ -367,18 +502,46 @@
         dims (long (count col-names))
         k (long (:k conf))
         max-iterations (long (get conf :iterations 100))
+        checkpoint-path (:lloyd-checkpoint-path conf)
+        checkpoint-every (long (Math/max (long 1) (long (get conf :lloyd-checkpoint-every 1))))
+        resume-state (when checkpoint-path
+                       (resume-lloyd-checkpoint checkpoint-path conf k dims))
         progress-bar (pr/progress-bar max-iterations)]
     (println "Performing fast lloyd iteration...")
-    (let [initial-arr (centroid-ds->float-array initial-centroids col-names)
+    (let [initial-arr (if resume-state
+                        (:centroids resume-state)
+                        (centroid-ds->float-array initial-centroids col-names))
+          start-iteration (long (if resume-state
+                                  (:iteration resume-state)
+                                  0))
+          start-prev-inertia (double (if resume-state
+                                       (:prev-inertia resume-state)
+                                       Double/MAX_VALUE))
+          write-checkpoint (fn [^long iteration ^floats centroid-arr ^double inertia final?]
+                             (when (and checkpoint-path
+                                        (>= iteration 0)
+                                        (or final?
+                                            (checkpoint-due? iteration checkpoint-every)))
+                               (write-lloyd-checkpoint!
+                                checkpoint-path
+                                {:iteration iteration
+                                 :centroids centroid-arr
+                                 :inertia inertia
+                                 :k k
+                                 :dims dims
+                                 :distance-key (:distance-key conf)
+                                 :dataset-path (:points conf)})))
           chunks (preload-chunks conf)
-          [final-arr final-inertia]
+          [final-arr final-inertia _]
           (loop [^floats centroid-arr initial-arr
-                 iteration (long 0)
-                 prev-inertia (double Double/MAX_VALUE)]
+                 iteration start-iteration
+                 prev-inertia start-prev-inertia
+                 last-completed-iteration (dec start-iteration)]
             (pr/print (pr/tick progress-bar iteration))
             (if (>= iteration max-iterations)
               (do (pr/print (pr/done (pr/tick progress-bar iteration)))
-                  [centroid-arr prev-inertia])
+                  (write-checkpoint last-completed-iteration centroid-arr prev-inertia true)
+                  [centroid-arr prev-inertia last-completed-iteration])
               (let [iteration-result (lloyd-fast-iteration chunks centroid-arr k dims)
                     ^floats new-arr (nth iteration-result 0)
                     new-inertia (double (nth iteration-result 1))
@@ -395,8 +558,11 @@
                                       :max-iterations max-iterations
                                       :cost new-inertia
                                       :converged true}))
-                      [new-arr new-inertia])
-                  (recur new-arr (inc iteration) new-inertia)))))
+                      (write-checkpoint iteration new-arr new-inertia true)
+                      [new-arr new-inertia iteration])
+                  (do
+                    (write-checkpoint iteration new-arr new-inertia false)
+                    (recur new-arr (inc iteration) new-inertia iteration))))))
           final-centroids (float-array->centroid-ds final-arr k col-names)]
       (map->ClusterResult
        {:centroids final-centroids
