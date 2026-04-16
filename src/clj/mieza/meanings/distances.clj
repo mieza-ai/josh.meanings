@@ -221,10 +221,13 @@
 (defn setup-device
   "Sets up an OpenCL device."
   ([k distance-configuration length dev]
+   (setup-device k distance-configuration length dev nil))
+  ([k distance-configuration length dev max-rows]
    (let [ctx (context [dev])
          channel (chan)
          cqueue (command-queue ctx dev)
          otype-str (when k (-> k size->bytes bytes->type))
+         max-rows (long (or max-rows 0))
          program-source (-> distance-configuration :program io/resource slurp)
          program (program-with-source ctx [program-source])
          prog (try
@@ -261,6 +264,13 @@
                           (println "Failed to compile fused kernel:" (.getMessage e))
                           (when fused-program (println (build-log fused-program dev)))
                           nil)))
+         fused-kernel-name (-> distance-configuration :fused-kernel)
+         fused-cl-matrix (when (and fused-prog (pos? max-rows))
+                           (cl-buffer ctx (* max-rows (long length) Float/BYTES) :read-only))
+         fused-cl-assignments (when (and fused-prog (pos? max-rows))
+                                (cl-buffer ctx (* max-rows (long (size->bytes k))) :write-only))
+         fused-cl-kernel (when (and fused-prog fused-kernel-name)
+                           (kernel fused-prog fused-kernel-name))
          gpu-context-map {:chan channel
                           :dev dev
                           :kernel  (-> distance-configuration :kernel)
@@ -276,23 +286,36 @@
                           :sum-kernel "sum_by_group"
                           :fused-program fused-program
                           :fused-prog fused-prog
-                          :fused-kernel (-> distance-configuration :fused-kernel)}]
+                          :fused-kernel fused-kernel-name
+                          :fused-cl-kernel fused-cl-kernel
+                          :fused-cl-matrix fused-cl-matrix
+                          :fused-cl-assignments fused-cl-assignments
+                          :fused-max-rows max-rows
+                          :fused-cols (long length)}]
      (reset! gpu-context gpu-context-map)
      gpu-context-map)))
 
 
 (defn get-device-context
-  [configuration matrix]
-  (let [device  (->
-                 (platforms)
-                 (first)
-                 (devices)
-                 (first))
-        distance-configuration (-> configuration
-                                   :distance-key
-                                   gpu-accelerated)
-        k (-> configuration :k)]
-    (setup-device k distance-configuration (ncols matrix) device)))
+  ([configuration matrix]
+   (get-device-context configuration matrix (mrows matrix)))
+  ([configuration matrix max-rows]
+   (let [device  (->
+                  (platforms)
+                  (first)
+                  (devices)
+                  (first))
+         distance-configuration (-> configuration
+                                    :distance-key
+                                    gpu-accelerated)
+         k (-> configuration :k)]
+     (setup-device k distance-configuration (ncols matrix) device max-rows))))
+
+
+(defn max-point-row-count
+  [conf]
+  (when (:points conf)
+    (reduce max 0 (map ds/row-count (p/read-dataset-seq conf :points)))))
 
 
 ;; During Lloyd iteration it is common to re-use the same centroids while processing 
@@ -343,6 +366,9 @@
   "Tearsdown an OpenCL device."
   ([] (teardown-device @gpu-context))
   ([device-context]
+   (doseq [k [:fused-cl-kernel :fused-cl-matrix :fused-cl-assignments]]
+     (when-let [resource (k device-context)]
+       (clojurecl/release resource)))
    (doseq [k [:dev :ctx :cqueue :program :prog :min-program :min-prog :sum-program :sum-prog]]
      (clojurecl/release (k device-context)))
    ;; Release fused kernel resources if they were compiled
@@ -352,13 +378,15 @@
 
 (defmacro with-gpu-context
   [conf & forms]
-  `(do
-     (get-device-context ~conf
-                          (dataset->matrix
-                           ~conf 
-                           (if (not (nil? (:centroids ~conf)))
-                             (:centroids ~conf)
-                             (first (p/read-dataset-seq ~conf :points)))))
+  `(let [conf# ~conf
+         setup-matrix# (dataset->matrix
+                        conf#
+                        (if (not (nil? (:centroids conf#)))
+                          (:centroids conf#)
+                          (first (p/read-dataset-seq conf# :points))))
+         max-rows# (max (long (mrows setup-matrix#))
+                        (long (or (max-point-row-count conf#) 0)))]
+     (get-device-context conf# setup-matrix# max-rows#)
      (try
        ~@forms
        (finally
@@ -550,7 +578,7 @@
   ([device-context matrix local-size]
    (let [num-clusters (long (:k device-context))
          n (long (mrows matrix))
-         cols (long (ncols matrix))
+         max-rows (long (or (:fused-max-rows device-context) 0))
          local-size (long local-size)
          _ (when-not (pos? local-size)
              (throw (IllegalArgumentException. "local-size must be positive")))
@@ -562,17 +590,25 @@
          matrix-buffer (float-pointer-byte-buffer matrix-ptr)
          min-indices (create-min-index-result-array num-clusters n)
          cqueue (:cqueue device-context)
-         cl-centroids (:cl-centroids device-context)]
-     (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
-                    cl-assignments (create-min-index-buffer (:ctx device-context) num-clusters n)
-                    cl-kernel (kernel (:fused-prog device-context) (:fused-kernel device-context))]
-       (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
-                  (int-array [1]) (int-array [n]) (int-array [num-clusters]))
-       (enq-write! cqueue cl-matrix matrix-buffer)
-       (enq-kernel! cqueue cl-kernel work-size)
-       (enq-read! cqueue cl-assignments min-indices)
-       (finish! cqueue)
-       min-indices))))
+         cl-centroids (:cl-centroids device-context)
+         cl-matrix (:fused-cl-matrix device-context)
+         cl-assignments (:fused-cl-assignments device-context)
+         cl-kernel (:fused-cl-kernel device-context)]
+     (when (some nil? [cl-matrix cl-assignments cl-kernel])
+       (throw (IllegalStateException.
+               "Fused assignment OpenCL objects were not initialized on the device context.")))
+     (when (> n max-rows)
+       (throw (IllegalArgumentException.
+               (str "Fused assignment chunk has " n
+                    " rows, but the reusable OpenCL buffer was sized for "
+                    max-rows " rows."))))
+     (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
+                (int-array [1]) (int-array [n]) (int-array [num-clusters]))
+     (enq-write! cqueue cl-matrix matrix-buffer)
+     (enq-kernel! cqueue cl-kernel work-size)
+     (enq-read! cqueue cl-assignments min-indices)
+     (finish! cqueue)
+     min-indices)))
 
 
 (defn fused-minimum-index
