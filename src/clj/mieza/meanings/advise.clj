@@ -16,7 +16,7 @@
 (defn- open-read-only
   ^long [filepath]
   (.invokeInt (libc-function "open")
-              (object-array [filepath (Integer/valueOf o-rdonly)])))
+              (object-array [filepath (Integer/valueOf (int o-rdonly))])))
 
 (defn- close-fd!
   [fd]
@@ -29,7 +29,7 @@
               (object-array [(Integer/valueOf (int fd))
                              (Long/valueOf 0)
                              (Long/valueOf 0)
-                             (Integer/valueOf posix-fadv-dontneed)])))
+                             (Integer/valueOf (int posix-fadv-dontneed))])))
 
 (defn dontneed!
   "Signals the OS that the contents of `filepath` are no longer needed and

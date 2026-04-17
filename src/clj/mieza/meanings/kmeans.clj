@@ -115,7 +115,7 @@
 
 (defn- arrow-metadata-row-count
   "Counts Arrow record-batch rows from IPC metadata while seeking over bodies."
-  [filepath]
+  [^String filepath]
   (try
     (with-open [raf (RandomAccessFile. filepath "r")]
       (let [channel (.getChannel raf)
