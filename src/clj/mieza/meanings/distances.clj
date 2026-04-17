@@ -42,6 +42,9 @@
    [mieza.meanings.persistence :as p]
    [tech.v3.dataset :as ds]
    [tech.v3.dataset.neanderthal :refer [dataset->dense]]
+   [tech.v3.datatype :as dtype]
+   [tech.v3.parallel.for :as pfor]
+   [tech.v3.tensor :as dtt]
    [uncomplicate.clojurecl.core :refer [build-program! cl-buffer command-queue
                                         context devices enq-kernel! enq-read!
                                         enq-write! finish! kernel platforms
@@ -116,12 +119,42 @@
 
 (defn matrix->float-array
   "Extracts the raw float data from a Neanderthal matrix as a Java float array.
-   Layout is row-major: [row0-col0, row0-col1, ..., row1-col0, ...]."
-  ^floats [matrix]
-  (let [ptr (buffer matrix)
-        arr (float-array (.capacity ^org.bytedeco.javacpp.FloatPointer ptr))]
-    (.get ^org.bytedeco.javacpp.FloatPointer ptr arr)
-    arr))
+   Layout is row-major: [row0-col0, row0-col1, ..., row1-col0, ...].
+
+   The 2-arity reads only the first `n-floats` from the matrix buffer, which
+   avoids allocating a full max-rows*dims array when `matrix` is a reusable
+   host matrix sized larger than the current chunk."
+  (^floats [matrix]
+   (let [ptr (buffer matrix)
+         arr (float-array (.capacity ^org.bytedeco.javacpp.FloatPointer ptr))]
+     (.get ^org.bytedeco.javacpp.FloatPointer ptr arr)
+     arr))
+  (^floats [matrix ^long n-floats]
+   (let [ptr (buffer matrix)
+         arr (float-array n-floats)]
+     (.get ^org.bytedeco.javacpp.FloatPointer ptr arr 0 (int n-floats))
+     arr)))
+
+
+(c/defn fill-host-matrix!
+  "Writes `ds` row-major into the first `(ds/row-count ds)` rows of the
+   pre-allocated row-major float32 Neanderthal matrix `host-matrix`.
+   Avoids the per-chunk fge allocation + memset that otherwise dominates
+   the Lloyd hot path. Columns are copied in parallel, matching the
+   original dataset->dense implementation. Returns the host matrix."
+  [host-matrix ds col-names]
+  (let [ds (if (= (vec col-names) (vec (ds/column-names ds)))
+             ds
+             (ds/select-columns ds col-names))
+        n (long (ds/row-count ds))
+        tens (dtt/ensure-tensor host-matrix)
+        tens-cols (dtt/columns tens)]
+    (->> (pfor/pmap (fn [tens-col ds-col]
+                      (dtype/copy! ds-col (dtype/sub-buffer tens-col 0 n)))
+                    tens-cols
+                    (vals ds))
+         (dorun))
+    host-matrix))
 
 (c/defn- float-pointer-byte-buffer
   "Returns a direct ByteBuffer view over a JavaCPP FloatPointer without copying."
@@ -275,6 +308,8 @@
                            (cl-buffer ctx (* max-rows (long length) Float/BYTES) :read-only))
          fused-cl-assignments (when (and fused-prog (pos? max-rows))
                                 (cl-buffer ctx (* max-rows (long (size->bytes k))) :write-only))
+         fused-host-matrix (when (and fused-prog (pos? max-rows))
+                             (fge max-rows (long length) {:layout :row}))
          fused-cl-kernel (when (and fused-prog fused-kernel-name)
                            (kernel fused-prog fused-kernel-name))
          reduce-program-source (when k
@@ -311,6 +346,7 @@
                           :fused-cl-kernel fused-cl-kernel
                           :fused-cl-matrix fused-cl-matrix
                           :fused-cl-assignments fused-cl-assignments
+                          :fused-host-matrix fused-host-matrix
                           :fused-max-rows max-rows
                           :fused-cols (long length)
                           :reduce-program reduce-program
@@ -391,7 +427,7 @@
   "Tearsdown an OpenCL device."
   ([] (teardown-device @gpu-context))
   ([device-context]
-   (doseq [k [:fused-cl-kernel :fused-cl-matrix :fused-cl-assignments]]
+   (doseq [k [:fused-cl-kernel :fused-cl-matrix :fused-cl-assignments :fused-host-matrix]]
      (when-let [resource (k device-context)]
        (clojurecl/release resource)))
    (doseq [k [:dev :ctx :cqueue :program :prog :min-program :min-prog :sum-program :sum-prog]]
@@ -599,12 +635,19 @@
 ;; minimum in registers, writing only the final assignment index.
 (defn gpu-fused-assign
   "Computes distance + argmin in a single kernel, returning assignment indices.
-   Eliminates the intermediate N*K distance matrix entirely."
+   Eliminates the intermediate N*K distance matrix entirely.
+   Accepts an explicit `n` (valid row count) so a matrix pre-allocated at
+   max-rows can be reused across chunks without zero-initializing on each call."
   ([device-context matrix]
-   (gpu-fused-assign device-context matrix (or (:fused-local-size device-context) 128)))
-  ([device-context matrix local-size]
+   (gpu-fused-assign device-context matrix (long (mrows matrix))
+                     (or (:fused-local-size device-context) 128)))
+  ([device-context matrix n]
+   (gpu-fused-assign device-context matrix n
+                     (or (:fused-local-size device-context) 128)))
+  ([device-context matrix n local-size]
    (let [num-clusters (long (:k device-context))
-         n (long (mrows matrix))
+         n (long n)
+         cols (long (:fused-cols device-context))
          max-rows (long (or (:fused-max-rows device-context) 0))
          local-size (long local-size)
          _ (when-not (pos? local-size)
@@ -614,7 +657,8 @@
          local-work-size [local-size]
          work-size (work-size global-work-size local-work-size)
          ^FloatPointer matrix-ptr (buffer matrix)
-         matrix-buffer (float-pointer-byte-buffer matrix-ptr)
+         matrix-buffer (doto (.asByteBuffer matrix-ptr)
+                         (.limit (int (* n cols Float/BYTES))))
          min-indices (create-min-index-result-array num-clusters n)
          cqueue (:cqueue device-context)
          cl-centroids (:cl-centroids device-context)

@@ -569,8 +569,9 @@
 
 (defn- lloyd-fast-iteration
   "Runs one Lloyd iteration: GPU fused assign + CPU accumulation.
-   Streams chunks from disk via mmap, releasing each Neanderthal matrix
-   immediately after use to prevent native memory accumulation.
+   Reuses the host Neanderthal matrix from the device context, so chunk
+   data is copied into a single pre-allocated buffer rather than causing
+   an fge + memset per chunk.
    Returns [new-centroid-arr inertia]."
   [^KMeansState conf ^floats centroid-arr k dims distance-key]
   (let [k (long k)
@@ -578,16 +579,17 @@
         centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
         _ (distances/write-centroids-buffer! distances/gpu-context centroid-matrix)
         ctx @distances/gpu-context
+        host-matrix (:fused-host-matrix ctx)
         distance-fn (distances/get-distance-fn distance-key)
         sums (double-array (* k dims))
         counts (int-array k)
-        inertia-acc (atom 0.0)]
+        inertia-acc (atom 0.0)
+        col-names (:col-names conf)]
     (doseq [ds (persist/read-dataset-seq conf :points)]
-      (let [matrix (distances/dataset->matrix conf ds)
-            n (long (ne/mrows matrix))
-            assignments-arr (distances/gpu-fused-assign ctx matrix)
-            points-arr (distances/matrix->float-array matrix)
-            _ (uc/release matrix)]
+      (let [n (long (ds/row-count ds))
+            _ (distances/fill-host-matrix! host-matrix ds col-names)
+            assignments-arr (distances/gpu-fused-assign ctx host-matrix n)
+            points-arr (distances/matrix->float-array host-matrix (* n dims))]
         (accumulate-chunk! points-arr assignments-arr sums counts n dims)
         (swap! inertia-acc + (chunk-inertia distance-key distance-fn points-arr assignments-arr
                                             centroid-arr n dims))))
