@@ -173,7 +173,9 @@
 ;; for the presence of the relevant key.
 (def gpu-accelerated
   {:emd          {:program "emd_multi.c"          :kernel "wasserstein_distances"
-                  :fused-program "fused_emd_assign.c"          :fused-kernel "fused_emd_assign"}
+                  :fused-program "fused_emd_assign.c"          :fused-kernel "fused_emd_assign"
+                  :reduce-program "fused_emd_assign_reduce.c"
+                  :reduce-kernel "fused_emd_assign_reduce"}
    :euclidean    {:program "euclidean_multi.c"    :kernel "euclidean_distances"
                   :fused-program "fused_euclidean_assign.c"    :fused-kernel "fused_euclidean_assign"}
    :manhattan    {:program "manhattan_multi.c"    :kernel "manhattan_distances"
@@ -728,7 +730,9 @@
    (gpu-fused-assign-and-reduce device-context matrix (long (mrows matrix))))
   ([device-context matrix n]
    (when-not (:reduce-prog device-context)
-     (throw (ex-info "Fused assign+reduce is only available for :euclidean-sq."
+     (throw (ex-info (str "Fused assign+reduce is unavailable for "
+                          (:distance-key device-context)
+                          "; only distances with a :reduce-program are supported.")
                      {:distance-key (:distance-key device-context)})))
    (let [num-clusters (long (:k device-context))
          n (long n)

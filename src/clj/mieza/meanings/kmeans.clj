@@ -859,11 +859,12 @@
 
 
 (defn lloyd-fast-reduced
-  "Fast Lloyd iteration using GPU fused Euclidean-sq assignment plus per-block
-   partial reduction. Only :euclidean-sq is supported by this kernel path."
+  "Fast Lloyd iteration using a GPU fused assign+reduce kernel. Requires
+   distances/reduce-accelerated? for the configured :distance-key."
   ^ClusterResult [^KMeansState conf initial-centroids]
   (when-not (distances/reduce-accelerated? conf)
-    (throw (ex-info ":fused-reduce is currently supported only for :euclidean-sq."
+    (throw (ex-info (str ":fused-reduce has no GPU kernel for "
+                         (:distance-key conf))
                     {:distance-key (:distance-key conf)})))
   (let [col-names (:col-names conf)
         dims (long (count col-names))
@@ -914,7 +915,8 @@
                (range 0 (:k conf)))]
     (when (and (:fused-reduce conf)
                (not (distances/reduce-accelerated? conf)))
-      (throw (ex-info ":fused-reduce is currently supported only for :euclidean-sq."
+      (throw (ex-info (str ":fused-reduce has no GPU kernel for "
+                           (:distance-key conf))
                       {:distance-key (:distance-key conf)})))
     (distances/with-gpu-context conf
       (cond

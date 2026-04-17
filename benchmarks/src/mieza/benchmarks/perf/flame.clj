@@ -5,11 +5,12 @@
    [clj-async-profiler.core :as prof]
    [mieza.meanings.kmeans :as km]))
 
-(defn -main [& [points-file k-str reduce-str]]
+(defn -main [& [points-file k-str reduce-str distance-str]]
   (let [points (or points-file "benchmarks/comparative/data/large_50d.arrow")
         k      (Long/parseLong (or k-str "10"))
         reduce? (Boolean/parseBoolean (or reduce-str "false"))
-        opts  {:distance-key :euclidean-sq
+        distance-key (keyword (or distance-str "euclidean-sq"))
+        opts  {:distance-key distance-key
                :fused-assign true
                :fused-reduce reduce?
                :init :afk-mc

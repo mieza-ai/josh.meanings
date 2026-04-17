@@ -13,11 +13,12 @@
 (defn- fmt-secs [nanos]
   (format "%.2f s" (/ (double nanos) 1e9)))
 
-(defn -main [& [points-file k-str reduce-str]]
+(defn -main [& [points-file k-str reduce-str distance-str]]
   (let [points (or points-file "benchmarks/comparative/data/med_50d.arrow")
         k      (Long/parseLong (or k-str "10"))
         reduce? (Boolean/parseBoolean (or reduce-str "false"))
-        opts  {:distance-key :euclidean-sq
+        distance-key (keyword (or distance-str "euclidean-sq"))
+        opts  {:distance-key distance-key
                :fused-assign true
                :fused-reduce reduce?
                :init :afk-mc
