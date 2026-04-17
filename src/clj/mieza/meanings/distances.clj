@@ -721,48 +721,52 @@
 (defn gpu-fused-assign-and-reduce
   "Computes Euclidean-squared assignment and per-block centroid partials on the
    GPU, then reduces block partials on the CPU in double precision.
+   Accepts an explicit `n` (valid row count) so a matrix pre-allocated at
+   max-rows can be reused across chunks.
    Returns {:sums double-array :counts int-array :inertia double}."
-  [device-context matrix]
-  (when-not (:reduce-prog device-context)
-    (throw (ex-info "Fused assign+reduce is only available for :euclidean-sq."
-                    {:distance-key (:distance-key device-context)})))
-  (let [num-clusters (long (:k device-context))
-        n (long (mrows matrix))
-        cols (long (ncols matrix))]
-    (if (zero? n)
-      {:sums (double-array (* num-clusters cols))
-       :counts (int-array num-clusters)
-       :inertia 0.0}
-      (let [local-size (long (:reduce-local-size device-context))
-            block-count (long (work-item-batches n local-size))
-            global-size (long (rounded-global-size n local-size))
-            work-size (work-size [global-size] [local-size])
-            partial-sum-count (* block-count num-clusters cols)
-            partial-count-count (* block-count num-clusters)
-            partial-sums (float-array partial-sum-count)
-            partial-counts (int-array partial-count-count)
-            partial-inertia (float-array block-count)
-            ^FloatPointer matrix-ptr (buffer matrix)
-            matrix-array (float-array (.capacity matrix-ptr))
-            _ (.get matrix-ptr matrix-array)
-            cqueue (:cqueue device-context)
-            cl-centroids (:cl-centroids device-context)]
-        (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
-                       cl-partial-sums (cl-buffer (:ctx device-context) (* partial-sum-count Float/BYTES) :write-only)
-                       cl-partial-counts (cl-buffer (:ctx device-context) (* partial-count-count Integer/BYTES) :write-only)
-                       cl-partial-inertia (cl-buffer (:ctx device-context) (* block-count Float/BYTES) :write-only)
-                       cl-kernel (kernel (:reduce-prog device-context) (:reduce-kernel device-context))]
-          (set-args! cl-kernel cl-matrix cl-centroids
-                     cl-partial-sums cl-partial-counts cl-partial-inertia
-                     (int-array [n]) (int-array [num-clusters]))
-          (enq-write! cqueue cl-matrix matrix-array)
-          (enq-kernel! cqueue cl-kernel work-size)
-          (enq-read! cqueue cl-partial-sums partial-sums)
-          (enq-read! cqueue cl-partial-counts partial-counts)
-          (enq-read! cqueue cl-partial-inertia partial-inertia)
-          (finish! cqueue)
-          (reduce-block-partials partial-sums partial-counts partial-inertia
-                                 block-count num-clusters cols))))))
+  ([device-context matrix]
+   (gpu-fused-assign-and-reduce device-context matrix (long (mrows matrix))))
+  ([device-context matrix n]
+   (when-not (:reduce-prog device-context)
+     (throw (ex-info "Fused assign+reduce is only available for :euclidean-sq."
+                     {:distance-key (:distance-key device-context)})))
+   (let [num-clusters (long (:k device-context))
+         n (long n)
+         cols (long (:fused-cols device-context))]
+     (if (zero? n)
+       {:sums (double-array (* num-clusters cols))
+        :counts (int-array num-clusters)
+        :inertia 0.0}
+       (let [local-size (long (:reduce-local-size device-context))
+             block-count (long (work-item-batches n local-size))
+             global-size (long (rounded-global-size n local-size))
+             work-size (work-size [global-size] [local-size])
+             partial-sum-count (* block-count num-clusters cols)
+             partial-count-count (* block-count num-clusters)
+             partial-sums (float-array partial-sum-count)
+             partial-counts (int-array partial-count-count)
+             partial-inertia (float-array block-count)
+             ^FloatPointer matrix-ptr (buffer matrix)
+             matrix-buffer (doto (.asByteBuffer matrix-ptr)
+                             (.limit (int (* n cols Float/BYTES))))
+             cqueue (:cqueue device-context)
+             cl-centroids (:cl-centroids device-context)]
+         (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
+                        cl-partial-sums (cl-buffer (:ctx device-context) (* partial-sum-count Float/BYTES) :write-only)
+                        cl-partial-counts (cl-buffer (:ctx device-context) (* partial-count-count Integer/BYTES) :write-only)
+                        cl-partial-inertia (cl-buffer (:ctx device-context) (* block-count Float/BYTES) :write-only)
+                        cl-kernel (kernel (:reduce-prog device-context) (:reduce-kernel device-context))]
+           (set-args! cl-kernel cl-matrix cl-centroids
+                      cl-partial-sums cl-partial-counts cl-partial-inertia
+                      (int-array [n]) (int-array [num-clusters]))
+           (enq-write! cqueue cl-matrix matrix-buffer)
+           (enq-kernel! cqueue cl-kernel work-size)
+           (enq-read! cqueue cl-partial-sums partial-sums)
+           (enq-read! cqueue cl-partial-counts partial-counts)
+           (enq-read! cqueue cl-partial-inertia partial-inertia)
+           (finish! cqueue)
+           (reduce-block-partials partial-sums partial-counts partial-inertia
+                                  block-count num-clusters cols)))))))
 
 
 (defn fused-minimum-index

@@ -13,27 +13,25 @@
 (defn- fmt-secs [nanos]
   (format "%.2f s" (/ (double nanos) 1e9)))
 
-(defn -main [& [points-file k-str]]
+(defn -main [& [points-file k-str reduce-str]]
   (let [points (or points-file "benchmarks/comparative/data/med_50d.arrow")
-        k      (Long/parseLong (or k-str "10"))]
-    (println "Benchmark: " points "k=" k)
+        k      (Long/parseLong (or k-str "10"))
+        reduce? (Boolean/parseBoolean (or reduce-str "false"))
+        opts  {:distance-key :euclidean-sq
+               :fused-assign true
+               :fused-reduce reduce?
+               :init :afk-mc
+               :format :arrow}]
+    (println "Benchmark: " points "k=" k ":fused-reduce" reduce?)
     ;; warmup: let JIT settle on a smaller k
     (force-gc!)
     (println "warmup run (discarded)...")
-    (km/k-means-via-file points 3
-                         :distance-key :euclidean-sq
-                         :fused-assign true
-                         :init :afk-mc
-                         :format :arrow)
+    (apply km/k-means-via-file points 3 (apply concat opts))
     ;; three timed runs
     (doseq [run-idx [1 2 3]]
       (force-gc!)
       (let [t0 (System/nanoTime)
-            _  (km/k-means-via-file points k
-                                    :distance-key :euclidean-sq
-                                    :fused-assign true
-                                    :init :afk-mc
-                                    :format :arrow)
+            _  (apply km/k-means-via-file points k (apply concat opts))
             t1 (System/nanoTime)]
         (println "run" run-idx "wall-time:" (fmt-secs (- t1 t0))))))
   (shutdown-agents)

@@ -753,14 +753,18 @@
   [^KMeansState conf ^floats centroid-arr ^long k ^long dims]
   (let [centroid-matrix (ne-native/fge k dims centroid-arr {:layout :row})
         sums (double-array (* k dims))
-        counts (int-array k)]
+        counts (int-array k)
+        host-matrix (:fused-host-matrix @distances/gpu-context)
+        col-names (:col-names conf)]
     (distances/write-centroids-buffer! distances/gpu-context centroid-matrix)
     (let [inertia
           (try
             (reduce
              (fn [acc ds]
-               (let [matrix (distances/dataset->matrix conf ds)
-                     reduced-chunk (distances/gpu-fused-assign-and-reduce @distances/gpu-context matrix)]
+               (let [n (long (ds/row-count ds))
+                     _ (distances/fill-host-matrix! host-matrix ds col-names)
+                     reduced-chunk (distances/gpu-fused-assign-and-reduce
+                                    @distances/gpu-context host-matrix n)]
                  ;; Correctness note: for :euclidean-sq, the kernel computes the
                  ;; same argmin assignment as the old fused path, then returns
                  ;; per-cluster sums/counts. Reducing those partials in double
@@ -770,6 +774,7 @@
              0.0
              (persist/read-dataset-seq conf :points))
             (finally
+              (uc/release centroid-matrix)
               (distances/release-centroids-buffer! distances/gpu-context)))]
       (let [^floats new-arr (compute-centroids-from-sums sums counts k dims)]
         (dotimes [c k]
