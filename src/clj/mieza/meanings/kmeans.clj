@@ -30,7 +30,7 @@
             [mieza.meanings.persistence :as persist]
             [mieza.meanings.protocols.classifier :refer [assignments Classifier]]
             [mieza.meanings.records.cluster-result :refer [map->ClusterResult]]
-            [mieza.meanings.records.clustering-state :refer [->KMeansState]]
+            [mieza.meanings.records.clustering-state :refer [->KMeansState map->KMeansState]]
             [progrock.core :as pr]
             [tech.v3.dataset :as ds]
             [tech.v3.dataset.reductions :as dsr]
@@ -213,9 +213,15 @@
 (extend-type ClusterResult
   Classifier
   (assignments [this dataset-seq]
-    (let [config (-> this
-                     :configuration
-                     (assoc :centroids (:centroids this)))]
+    ;; The :configuration field is a plain map; the recursive call needs a
+    ;; KMeansState so it dispatches to the Classifier impl above instead of
+    ;; NPE'ing with "No implementation found for PersistentHashMap". Previously
+    ;; this worked only when the caller happened to hand in a KMeansState
+    ;; already wrapped inside the record — not true when the record was
+    ;; rehydrated from disk.
+    (let [config (-> (merge default-options (:configuration this))
+                     (assoc :centroids (:centroids this))
+                     map->KMeansState)]
       (assignments config dataset-seq))))
 
 
