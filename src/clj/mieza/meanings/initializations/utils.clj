@@ -11,6 +11,7 @@
             [taoensso.timbre :as log]
             [tech.v3.dataset :as ds]
             [tech.v3.dataset.neanderthal :as ds-nean]
+            [tech.v3.datatype :as dtype]
             [tech.v3.datatype.functional :as dfn]
             [uncomplicate.commons.core :as uc]
             [uncomplicate.neanderthal
@@ -116,30 +117,55 @@
     result))
 
 
+(defn- peek-res-rank
+  "Reads :res-rank on the heap's current top without paying per-call boxing
+   overhead in the surrounding hot loop; still one boxed lookup per call
+   but now only invoked when the threshold cache is refreshed."
+  ^double [^java.util.concurrent.PriorityBlockingQueue acc]
+  (if-let [top (.peek acc)]
+    (double (get top :res-rank))
+    Double/NEGATIVE_INFINITY))
+
+
 (defn weighted-sample
   [ds-seq weight-col ^long k]
-  (let [add-to-queue  (fn ^java.util.concurrent.PriorityBlockingQueue
-                        [^java.util.concurrent.PriorityBlockingQueue acc ds]
-                        (doseq [row (ds/rows (if (< (.size acc) k)
-                                               ds
-                                               (let [lowest (get (.peek acc) :res-rank)]
-                                                 (ds/filter-column ds :res-rank (fn [x] (>= x lowest))))))]
-                          (if (< (.size acc) k)
-                            (.add acc row)
-                            (when (< (get (.peek acc) :res-rank) (get row :res-rank))
-                              (.poll acc)
-                              (.add acc row))))
-                        acc)
-        merge-queues (fn ^java.util.concurrent.PriorityBlockingQueue
-                       [^java.util.concurrent.PriorityBlockingQueue acc
-                        ^java.util.concurrent.PriorityBlockingQueue rows]
-                       (doseq [row rows]
-                         (when (< (get (.peek acc) :res-rank) (get row :res-rank))
-                           (.poll acc)
-                           (.add acc row)))
-                       (while (> (.size acc) k)
-                         (.poll acc))
-                       acc)
+  (let [add-to-queue
+        (fn ^java.util.concurrent.PriorityBlockingQueue
+          [^java.util.concurrent.PriorityBlockingQueue acc ds]
+          ;; Read :res-rank once as a primitive DoubleReader so the inner
+          ;; loop compares raw doubles instead of calling Dataset.readObject
+          ;; (which boxes every column value via Double/valueOf).
+          (let [^tech.v3.datatype.Buffer rank-reader (dtype/->reader (ds :res-rank) :float64)
+                ^java.util.List rows (ds/rows ds)
+                n (.lsize rank-reader)
+                ;; Cache the heap's smallest rank so we only refresh it when
+                ;; the heap actually changes; avoids a per-row (get peek) box.
+                threshold (double-array 1)
+                _ (aset threshold 0 (if (< (.size acc) k)
+                                      Double/NEGATIVE_INFINITY
+                                      (peek-res-rank acc)))]
+            (dotimes [i n]
+              (let [rank (.readDouble rank-reader i)]
+                (when (< (aget threshold 0) rank)
+                  (if (< (.size acc) k)
+                    (do (.add acc (.get rows (int i)))
+                        (when (>= (.size acc) k)
+                          (aset threshold 0 (peek-res-rank acc))))
+                    (do (.poll acc)
+                        (.add acc (.get rows (int i)))
+                        (aset threshold 0 (peek-res-rank acc)))))))
+            acc))
+        merge-queues
+        (fn ^java.util.concurrent.PriorityBlockingQueue
+          [^java.util.concurrent.PriorityBlockingQueue acc
+           ^java.util.concurrent.PriorityBlockingQueue rows]
+          (doseq [row rows]
+            (when (< (peek-res-rank acc) (double (get row :res-rank)))
+              (.poll acc)
+              (.add acc row)))
+          (while (> (.size acc) k)
+            (.poll acc))
+          acc)
         ^java.util.concurrent.PriorityBlockingQueue q
         (->> ds-seq
              (hfl/map (fn [dataset] (reservoir-rank dataset weight-col)))
