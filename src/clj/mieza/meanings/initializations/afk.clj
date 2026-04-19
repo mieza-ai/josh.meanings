@@ -46,6 +46,55 @@
   (let [file (:points conf)] (str (fs/path (fs/parent file) "qx.arrow"))))
 
 
+(defn afk-centroids-checkpoint-file
+  "Path to the persisted partial-centroid set written incrementally during
+   AFK-MC² sampling. AFK is the longest single step in the pipeline
+   (river took ~9 h 25 m) and without a checkpoint a crash at sample
+   N/k loses all N draws. We write this file every
+   `afk-centroids-checkpoint-every` samples so resume only loses up to
+   that many."
+  [conf]
+  (let [file (:points conf)] (str (fs/path (fs/parent file) "afk-centroids.arrow"))))
+
+
+(def ^:const afk-centroids-checkpoint-every
+  "Write a partial-centroid snapshot every N new draws. Each snapshot is
+   a full arrow rewrite of the current cluster set (only tens of rows at
+   200-centroid runs, so rewriting is cheap). 10 keeps the worst-case
+   loss at 10 samples and the IO overhead under a percent of total AFK
+   runtime."
+  10)
+
+
+(defn- write-afk-checkpoint!
+  [conf clusters]
+  (let [tmp  (str (afk-centroids-checkpoint-file conf) ".tmp")
+        dest (afk-centroids-checkpoint-file conf)]
+    (p/write-datasets tmp [clusters])
+    (fs/move tmp dest {:replace-existing true :atomic-move true})
+    (log/info "AFK-MC² checkpoint saved" {:centroids (ds/row-count clusters)
+                                           :target (:k conf)
+                                           :path dest})))
+
+
+(defn- read-afk-checkpoint
+  "Returns the persisted partial-centroid dataset, or nil if no
+   checkpoint exists or the file can't be read."
+  [conf]
+  (c/let [path (afk-centroids-checkpoint-file conf)]
+    (when (fs/exists? path)
+      (try
+        (c/let [ds-seq (p/read-dataset-seq path)
+                concatenated (apply ds/concat-copying (c/first ds-seq) (c/rest ds-seq))]
+          (log/info "AFK-MC² checkpoint found"
+                    {:path path :centroids (ds/row-count concatenated)})
+          concatenated)
+        (catch Exception e
+          (log/warn "AFK-MC² checkpoint unreadable; ignoring"
+                    {:path path :error (ex-message e)})
+          nil)))))
+
+
 (def qx-column-name "qx")
 
 (s/fdef load-datasets-with-qx
@@ -195,19 +244,43 @@
 
 (s/fdef k-means-assumption-free-mc-initialization :args (s/cat :conf :mieza.meanings.specs/configuration) :ret :mieza.meanings.specs/points)
 (defn k-means-assumption-free-mc-initialization
+  "Runs AFK-MC² to pick k centroids.
+
+   Resume semantics: an incremental snapshot of the centroid set is
+   written to `afk-centroids-checkpoint-file` every
+   `afk-centroids-checkpoint-every` draws. On entry, if such a file
+   exists and holds < k centroids, sampling resumes from that row count
+   instead of from 1. q(x) is recomputed from qx.arrow (which itself is
+   reused via its own checkpoint in `q-of-x!`), so resume only costs
+   the newly-sampled centroids, not the entire AFK run."
   [conf]
   (distances/with-gpu-context conf
-    (let [initial-cluster (sample-one conf)
-          k (:k conf)
-          _ (q-of-x! conf initial-cluster)
+    (let [checkpoint   (read-afk-checkpoint conf)
+          initial      (if (and checkpoint
+                                (< (ds/row-count checkpoint) (:k conf)))
+                         (do (log/info "Resuming AFK-MC² from checkpoint"
+                                       {:centroids (ds/row-count checkpoint)
+                                        :target (:k conf)})
+                             checkpoint)
+                         (sample-one conf))
+          k            (:k conf)
+          _            (q-of-x! conf initial)
           progress-bar (pr/progress-bar k)
-          _  (println "Sampling clusters...")
-          final-clusters (loop [clusters initial-cluster]
-                           (let [centroid-count (ds/row-count clusters)]
-                             (pr/print (pr/tick progress-bar centroid-count))
-                             (if (< centroid-count k)
-                               (recur (ds/concat clusters (find-next-cluster conf clusters)))
-                               clusters)))]
+          _            (println "Sampling clusters...")
+          final-clusters
+          (loop [clusters initial]
+            (let [centroid-count (ds/row-count clusters)]
+              (pr/print (pr/tick progress-bar centroid-count))
+              (if (< centroid-count k)
+                (let [next-clusters (ds/concat clusters (find-next-cluster conf clusters))]
+                  (when (zero? (mod (ds/row-count next-clusters)
+                                    afk-centroids-checkpoint-every))
+                    (write-afk-checkpoint! conf next-clusters))
+                  (recur next-clusters))
+                clusters)))]
+      ;; Persist the completed set so a crash in downstream steps
+      ;; (transform/load) doesn't force a full AFK redo on retry.
+      (write-afk-checkpoint! conf final-clusters)
       (pr/print (pr/done (pr/tick progress-bar k)))
       final-clusters)))
 
