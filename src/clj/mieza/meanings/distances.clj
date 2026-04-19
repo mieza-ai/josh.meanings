@@ -686,9 +686,20 @@
 
 (defn reduce-accelerated?
   "Returns true when the fused assign+partial-reduce kernel is available.
-   The first implementation is intentionally limited to :euclidean-sq."
+   Checks both that the distance has a `:reduce-program` source registered
+   AND, if a GPU context is currently live, that the runtime kernel build
+   actually succeeded. The OpenCL build can fail at runtime on GPUs whose
+   shared-memory budget is too small for the kernel (we've seen Ampere
+   ptxas reject `fused_emd_assign_reduce` for using 162 KB of shared
+   memory when the device max is 48 KB), in which case the static config
+   would lie and Lloyd would crash inside the loop. Treating runtime
+   kernel-build failure as 'not accelerated' keeps the fallback path
+   honest."
   [conf]
-  (boolean (c/get-in gpu-accelerated [(:distance-key conf) :reduce-program])))
+  (and (boolean (c/get-in gpu-accelerated [(:distance-key conf) :reduce-program]))
+       (let [ctx @gpu-context]
+         (or (nil? ctx)            ;; no GPU context yet — answer based on static config
+             (some? (:reduce-prog ctx))))))
 
 
 (c/defn- reduce-block-partials

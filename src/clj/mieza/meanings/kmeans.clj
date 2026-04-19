@@ -919,21 +919,28 @@
         (assoc (initialize-centroids conf)
                :assignments
                (range 0 (:k conf)))]
-    (when (and (:fused-reduce conf)
-               (not (distances/reduce-accelerated? conf)))
-      (throw (ex-info (str ":fused-reduce has no GPU kernel for "
-                           (:distance-key conf))
-                      {:distance-key (:distance-key conf)})))
     (distances/with-gpu-context conf
-      (cond
-        (:fused-reduce conf)
-        (lloyd-fast-reduced conf centroids)
+      ;; Re-check fused-reduce availability AFTER the GPU context is up.
+      ;; The static `reduce-accelerated?` check before with-gpu-context
+      ;; would have lied if the OpenCL kernel build failed at runtime
+      ;; (e.g. ptxas rejecting fused_emd_assign_reduce on a GPU whose
+      ;; shared-memory budget is too small). Downgrade silently to
+      ;; `:fused-assign` rather than crashing inside Lloyd.
+      (let [fused-reduce-ok? (and (:fused-reduce conf)
+                                  (distances/reduce-accelerated? conf))]
+        (when (and (:fused-reduce conf) (not fused-reduce-ok?))
+          (println "WARN: requested :fused-reduce but the GPU kernel for"
+                   (:distance-key conf)
+                   "is unavailable at runtime; falling back to :fused-assign."))
+        (cond
+          fused-reduce-ok?
+          (lloyd-fast-reduced conf centroids)
 
-        (:fused-assign conf)
-        (lloyd-fast conf centroids)
+          (:fused-assign conf)
+          (lloyd-fast conf centroids)
 
-        :else
-        (lloyd conf centroids)))))
+          :else
+          (lloyd conf centroids))))))
 
 
 
