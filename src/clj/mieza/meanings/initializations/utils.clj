@@ -17,7 +17,6 @@
             [uncomplicate.neanderthal
              [random :refer [rand-uniform!]]
              [native :as native]]
-            [ham-fisted.api :as hamf]
             [clojure.core :as c]
             [clj-fast.clojure.core :refer [assoc defn fn get let]])
   (:import [mieza.meanings.records.clustering_state KMeansState]))
@@ -179,11 +178,34 @@
 
 (s/fdef sample-one :args (s/cat :conf t-config) :ret t-dataset)
 (defn sample-one
-  "Returns a single item from a near uniform sample of the points dataset in conf.
-   In practice this sample is slightly biased towards elements in the final sequences 
-   as for the sake of speed we skip weighting based on row count."
+  "Returns a one-row dataset drawn from the :points collection. Picks
+   uniformly within a record batch chosen uniformly among batches.
+
+   Why not the obvious `rand-nth (concat-all-rows)`: concatenating all
+   rows across ~10^5 Arrow batches of a 70 GB mmap'd file to pick one
+   point was the dominant cost of a fresh stage start — observed at
+   multiple hours on a 71 GB turn.arrow because each per-batch
+   `ds/rand-nth` materialized a full row via `hamf/vec` across 200+
+   Arrow-backed columns, one potential page fault per column read,
+   times ~10^5 batches in parallel pmap. That is O(N) work for an
+   O(1) question and it swamps real compute (qx-denominator, q-of-x!,
+   Lloyd) that genuinely needs to touch every point.
+
+   Realizing the seq of Dataset objects (vec) does not touch row data —
+   each Dataset is a wrapper over column Buffers that is created
+   lazily without paging in the underlying Arrow bytes. `ds/select-rows`
+   with a one-element index vector is a zero-copy view projection.
+
+   Bias: weighted by batch-size inverse rather than uniform across all
+   rows. Acceptable because AFK-MC² only uses this for its first
+   centroid, whose placement is compensated for by the q(x)
+   distribution computed in the next step; the algorithm's theoretical
+   guarantees do not require uniform first-centroid sampling."
   [conf]
-  (ds/->dataset [(rand-nth (into [] (hamf/pmap ds/rand-nth (p/read-dataset-seq conf :points))))]))
+  (let [batches (vec (p/read-dataset-seq conf :points))
+        batch   (c/rand-nth batches)
+        idx     (c/rand-int (ds/row-count batch))]
+    (ds/select-rows batch [idx])))
 
 
 (def ^:const d2-weight-col "__d2_weight")

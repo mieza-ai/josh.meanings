@@ -66,9 +66,21 @@
   10)
 
 
+(defn- afk-centroids-checkpoint-tmp
+  "Tmp path for the atomic-rename checkpoint write. Inserts `.tmp` *before*
+   the file extension so `persistence/filename->format` still routes to the
+   correct writer (`.arrow` → arrow writer); appending `.tmp` after the
+   extension leaves `.tmp` as the extension, no writer matches, and the
+   checkpoint write NPEs mid-AFK."
+  [conf]
+  (let [dest (afk-centroids-checkpoint-file conf)
+        ext  (re-find #"\.[^.]+$" dest)]
+    (str (subs dest 0 (- (count dest) (count ext))) ".tmp" ext)))
+
+
 (defn- write-afk-checkpoint!
   [conf clusters]
-  (let [tmp  (str (afk-centroids-checkpoint-file conf) ".tmp")
+  (let [tmp  (afk-centroids-checkpoint-tmp conf)
         dest (afk-centroids-checkpoint-file conf)]
     (p/write-datasets tmp [clusters])
     (fs/move tmp dest {:replace-existing true :atomic-move true})
