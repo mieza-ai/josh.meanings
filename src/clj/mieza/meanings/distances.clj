@@ -785,10 +785,24 @@
 
 
 (defn fused-minimum-index
-  "Returns nearest-centroid indices using the fused distance+argmin kernel."
+  "Returns nearest-centroid indices using the fused distance+argmin kernel.
+
+   Releases the per-chunk host Neanderthal matrix after the GPU enqueue
+   copies its bytes into the reusable `cl-matrix` OpenCL buffer. Without
+   this release, a one-pass assignment over a large dataset (e.g. turn
+   persist on ~2·10⁹ rows / ~2·10⁵ record batches) accumulates megabytes
+   per call of native off-heap allocations that the JVM cleaner can't
+   reclaim fast enough under sustained pressure, and the container ends
+   up SIGKILL'd by userspace OOM protection before the pass completes.
+   Matches the release pattern in neighbouring `minimum-index` /
+   `minimum-distance` and the explicit `uc/release` contract documented
+   on `q-of-x`."
   [conf ds]
   (let [ds-matrix (dataset->matrix conf ds)]
-    (gpu-fused-assign @gpu-context ds-matrix)))
+    (try
+      (gpu-fused-assign @gpu-context ds-matrix)
+      (finally
+        (clojurecl/release ds-matrix)))))
 
 
 ;; The GPU is so much faster than the CPU that we should be preferring
