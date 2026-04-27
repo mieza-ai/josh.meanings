@@ -15,6 +15,7 @@
    guarantees."
   (:refer-clojure :exclude [assoc defn defn- fn get let loop])
   (:require
+   [clojure.string :as string]
    [clojure.spec.alpha :as s]
    [fastmath.core]
    [ham-fisted.lazy-noncaching :as hfln]
@@ -38,12 +39,19 @@
    [clj-fast.clojure.core :refer [assoc defn defn- fn get let loop]]))
 
 
+(defn- points-sidecar-arrow-file
+  [conf suffix]
+  (let [file (:points conf)
+        filename (str (fs/file-name file))
+        basename (string/replace filename #"\.[^.]+$" "")]
+    (str (fs/path (or (fs/parent file) ".")
+                  (str basename "." suffix ".arrow")))))
 
 (s/fdef qx-file :args (s/cat :conf :mieza.meanings.specs/configuration) :ret string?)
 (defn qx-file
   "Returns the path to the file where the qx column is stored."
   [conf]
-  (let [file (:points conf)] (str (fs/path (fs/parent file) "qx.arrow"))))
+  (points-sidecar-arrow-file conf "qx"))
 
 
 (defn afk-centroids-checkpoint-file
@@ -54,7 +62,7 @@
    `afk-centroids-checkpoint-every` samples so resume only loses up to
    that many."
   [conf]
-  (let [file (:points conf)] (str (fs/path (fs/parent file) "afk-centroids.arrow"))))
+  (points-sidecar-arrow-file conf "afk-centroids"))
 
 
 (def ^:const afk-centroids-checkpoint-every
@@ -105,6 +113,37 @@
           (log/warn "AFK-MC² checkpoint unreadable; ignoring"
                     {:path path :error (ex-message e)})
           nil)))))
+
+(defn- checkpoint-column-mismatch?
+  [conf checkpoint]
+  (not= (set (map name (:col-names conf)))
+        (set (map name (ds/column-names checkpoint)))))
+
+(defn- checkpoint-row-mismatch?
+  [conf checkpoint]
+  (let [row-count (ds/row-count checkpoint)]
+    (or (zero? row-count)
+        (> row-count (:k conf)))))
+
+(defn- valid-afk-checkpoint
+  [conf]
+  (when-let [checkpoint (read-afk-checkpoint conf)]
+    (cond
+      (checkpoint-column-mismatch? conf checkpoint)
+      (do (log/warn "Ignoring AFK-MC² checkpoint with incompatible columns"
+                    {:path (afk-centroids-checkpoint-file conf)
+                     :expected (:col-names conf)
+                     :actual (vec (ds/column-names checkpoint))})
+          nil)
+
+      (checkpoint-row-mismatch? conf checkpoint)
+      (do (log/warn "Ignoring AFK-MC² checkpoint with incompatible row count"
+                    {:path (afk-centroids-checkpoint-file conf)
+                     :k (:k conf)
+                     :centroids (ds/row-count checkpoint)})
+          nil)
+
+      :else checkpoint)))
 
 
 (def qx-column-name "qx")
@@ -190,8 +229,8 @@
                :clusters :mieza.meanings.specs/dataset))
 (defn q-of-x!
   "Computes and saves the q(x) distribution for all x in the dataset.
-   After writing qx.arrow, hints the kernel to drop :points (river) pages
-   from the page cache — sampling only reads qx.arrow, so the ~86 GB of
+   After writing the per-points qx file, hints the kernel to drop :points
+   (river) pages from the page cache — sampling only reads qx, so the ~86 GB of
    river mmap pages accumulated during qx-denominator + q-of-x passes
    can be evicted to make room for qx.arrow to stay resident."
   ([conf cluster]
@@ -267,13 +306,18 @@
    the newly-sampled centroids, not the entire AFK run."
   [conf]
   (distances/with-gpu-context conf
-    (let [checkpoint   (read-afk-checkpoint conf)
-          initial      (if (and checkpoint
-                                (< (ds/row-count checkpoint) (:k conf)))
+    (let [checkpoint   (valid-afk-checkpoint conf)
+          initial      (cond
+                         (and checkpoint (< (ds/row-count checkpoint) (:k conf)))
                          (do (log/info "Resuming AFK-MC² from checkpoint"
                                        {:centroids (ds/row-count checkpoint)
                                         :target (:k conf)})
                              checkpoint)
+
+                         (and checkpoint (= (ds/row-count checkpoint) (:k conf)))
+                         checkpoint
+
+                         :else
                          (sample-one conf))
           k            (:k conf)
           _            (q-of-x! conf initial)
