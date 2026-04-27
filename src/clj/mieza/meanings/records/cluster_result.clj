@@ -59,8 +59,14 @@
    `(load-model 'cluster-result.edn')`
    "
   [^String filename]
-  (-> filename 
-      slurp 
+  ;; `read-string` on a record literal returns a plain PersistentHashMap
+  ;; when the ClusterResult class isn't available to the reader context,
+  ;; which breaks the Classifier protocol dispatch later. Force it back
+  ;; into a record via `map->ClusterResult` so downstream code that
+  ;; dispatches on the record type keeps working.
+  (-> filename
+      slurp
       read-string
-      (update :centroids ds/->dataset)))
+      (update :centroids ds/->dataset)
+      map->ClusterResult))
 

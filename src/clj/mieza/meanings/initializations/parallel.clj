@@ -5,9 +5,8 @@
    [clojure.spec.alpha :as s]
    [tech.v3.dataset :as ds]
    [mieza.meanings.initializations.utils :refer
-    [uniform-sample weighted-sample add-d2-weights d2-weight-col]])
-  (:use
-   [mieza.meanings.initializations.core]))
+    [uniform-sample weighted-sample add-d2-weights d2-weight-col]]
+   [mieza.meanings.initializations.core :refer [initialize-centroids]]))
 
 (def t-config :mieza.meanings.specs/configuration)
 (def t-dataset :mieza.meanings.specs/dataset)

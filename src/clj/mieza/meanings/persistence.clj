@@ -15,7 +15,6 @@
             [tech.v3.dataset.io.csv :as ds-csv]
             [tech.v3.libs.arrow :as ds-arrow]
             [tech.v3.libs.parquet :as ds-parquet]
-            [clojure.spec.alpha :as s]
             [babashka.fs :as fs]))
 
 ;; CSV was extremely slow. Arrow failed to load really large files.

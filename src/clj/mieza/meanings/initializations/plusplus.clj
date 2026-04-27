@@ -1,12 +1,11 @@
 (ns mieza.meanings.initializations.plusplus
   (:require
-   [taoensso.timbre :as log :refer [info]]
+   [taoensso.timbre :as log]
    [mieza.meanings.persistence :as persist]
    [clojure.spec.alpha :as s]
    [mieza.meanings.initializations.utils :refer
-    [centroids->dataset uniform-sample weighted-sample add-d2-weights d2-weight-col]])
-  (:use
-   [mieza.meanings.initializations.core]))
+    [centroids->dataset uniform-sample weighted-sample add-d2-weights d2-weight-col]]
+   [mieza.meanings.initializations.core :refer [initialize-centroids]]))
 
 (def t-config :mieza.meanings.specs/configuration)
 (def t-dataset :mieza.meanings.specs/dataset)

@@ -31,9 +31,7 @@
    - :chebyshev
    - :euclidean-sq
    "
-  (:refer-clojure
-   :exclude
-   [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-])
+  (:refer-clojure :exclude [assoc defn fn let])
   (:require
    [clj-fast.clojure.core :refer [assoc defn fn let]]
    [clojure.core :as c]
@@ -44,11 +42,14 @@
    [mieza.meanings.persistence :as p]
    [tech.v3.dataset :as ds]
    [tech.v3.dataset.neanderthal :refer [dataset->dense]]
-   [uncomplicate.clojurecl
-             [core :as cl :refer :all]
-             [info :refer :all]]
-   [uncomplicate.clojurecl.core :refer :all]
-   [uncomplicate.clojurecl.info :refer :all]
+   [tech.v3.datatype :as dtype]
+   [tech.v3.parallel.for :as pfor]
+   [tech.v3.tensor :as dtt]
+   [uncomplicate.clojurecl.core :refer [build-program! cl-buffer command-queue
+                                        context devices enq-kernel! enq-read!
+                                        enq-write! finish! kernel platforms
+                                        program-with-source set-args! work-size]]
+   [uncomplicate.clojurecl.info :refer [build-log]]
    [uncomplicate.commons
              [core :as clojurecl :refer [with-release]]
              [utils :refer [direct-buffer]]]
@@ -107,21 +108,58 @@
 
 (defn dataset->matrix
   ([conf ds]
-   (-> ds
-       (ds/select-columns (:col-names conf))
-       (dataset->dense :row :float32)))
+   (let [col-names (:col-names conf)
+         ds (if (= (vec col-names) (vec (ds/column-names ds)))
+              ds
+              (ds/select-columns ds col-names))]
+     (dataset->dense ds :row :float32)))
   ([ds] 
    (dataset->dense ds :row :float32)))
 
 
 (defn matrix->float-array
   "Extracts the raw float data from a Neanderthal matrix as a Java float array.
-   Layout is row-major: [row0-col0, row0-col1, ..., row1-col0, ...]."
-  ^floats [matrix]
-  (let [ptr (buffer matrix)
-        arr (float-array (.capacity ^org.bytedeco.javacpp.FloatPointer ptr))]
-    (.get ^org.bytedeco.javacpp.FloatPointer ptr arr)
-    arr))
+   Layout is row-major: [row0-col0, row0-col1, ..., row1-col0, ...].
+
+   The 2-arity reads only the first `n-floats` from the matrix buffer, which
+   avoids allocating a full max-rows*dims array when `matrix` is a reusable
+   host matrix sized larger than the current chunk."
+  (^floats [matrix]
+   (let [ptr (buffer matrix)
+         arr (float-array (.capacity ^org.bytedeco.javacpp.FloatPointer ptr))]
+     (.get ^org.bytedeco.javacpp.FloatPointer ptr arr)
+     arr))
+  (^floats [matrix ^long n-floats]
+   (let [ptr (buffer matrix)
+         arr (float-array n-floats)]
+     (.get ^org.bytedeco.javacpp.FloatPointer ptr arr 0 (int n-floats))
+     arr)))
+
+
+(c/defn fill-host-matrix!
+  "Writes `ds` row-major into the first `(ds/row-count ds)` rows of the
+   pre-allocated row-major float32 Neanderthal matrix `host-matrix`.
+   Avoids the per-chunk fge allocation + memset that otherwise dominates
+   the Lloyd hot path. Columns are copied in parallel, matching the
+   original dataset->dense implementation. Returns the host matrix."
+  [host-matrix ds col-names]
+  (let [ds (if (= (vec col-names) (vec (ds/column-names ds)))
+             ds
+             (ds/select-columns ds col-names))
+        n (long (ds/row-count ds))
+        tens (dtt/ensure-tensor host-matrix)
+        tens-cols (dtt/columns tens)]
+    (->> (pfor/pmap (fn [tens-col ds-col]
+                      (dtype/copy! ds-col (dtype/sub-buffer tens-col 0 n)))
+                    tens-cols
+                    (vals ds))
+         (dorun))
+    host-matrix))
+
+(c/defn- float-pointer-byte-buffer
+  "Returns a direct ByteBuffer view over a JavaCPP FloatPointer without copying."
+  ^java.nio.ByteBuffer [^FloatPointer ptr]
+  (.asByteBuffer ptr))
 
 
 ;; GPU based distance functions need to work a little differently.  For CPU 
@@ -135,7 +173,9 @@
 ;; for the presence of the relevant key.
 (def gpu-accelerated
   {:emd          {:program "emd_multi.c"          :kernel "wasserstein_distances"
-                  :fused-program "fused_emd_assign.c"          :fused-kernel "fused_emd_assign"}
+                  :fused-program "fused_emd_assign.c"          :fused-kernel "fused_emd_assign"
+                  :reduce-program "fused_emd_assign_reduce.c"
+                  :reduce-kernel "fused_emd_assign_reduce"}
    :euclidean    {:program "euclidean_multi.c"    :kernel "euclidean_distances"
                   :fused-program "fused_euclidean_assign.c"    :fused-kernel "fused_euclidean_assign"}
    :manhattan    {:program "manhattan_multi.c"    :kernel "manhattan_distances"
@@ -143,7 +183,9 @@
    :chebyshev    {:program "chebyshev_multi.c"    :kernel "chebyshev_distances"
                   :fused-program "fused_chebyshev_assign.c"    :fused-kernel "fused_chebyshev_assign"}
    :euclidean-sq {:program "euclidean_sq_multi.c" :kernel "euclidean_sq_distances"
-                  :fused-program "fused_euclidean_sq_assign.c" :fused-kernel "fused_euclidean_sq_assign"}})
+                  :fused-program "fused_euclidean_sq_assign.c" :fused-kernel "fused_euclidean_sq_assign"
+                  :reduce-program "fused_euclidean_sq_assign_reduce.c"
+                  :reduce-kernel "fused_euclidean_sq_assign_reduce"}})
 
 ;; We can tell whether we can use an outerloop GPU program instead of innerloop 
 ;; function calls by calling a predicate function.  This will allow for seemless 
@@ -196,6 +238,21 @@
       batch-count
       (inc batch-count))))
 
+(c/defn- round-up-to-multiple
+  [n size]
+  (let [n (long n)
+        size (long size)
+        remainder (rem n size)]
+    (if (zero? remainder)
+      n
+      (+ n (- size remainder)))))
+
+(def ^:private reduce-local-size 256)
+
+(c/defn- rounded-global-size
+  [n local-size]
+  (* (long local-size) (work-item-batches n local-size)))
+
 ;; To the use the GPU we need to setup a context through which we will interact with the GPU.
 ;; There can be potentially many GPUs and we want to be able to leverage all of them to gain the 
 ;; maximum possible speed.
@@ -205,10 +262,13 @@
 (defn setup-device
   "Sets up an OpenCL device."
   ([k distance-configuration length dev]
+   (setup-device k distance-configuration length dev nil))
+  ([k distance-configuration length dev max-rows]
    (let [ctx (context [dev])
          channel (chan)
          cqueue (command-queue ctx dev)
          otype-str (when k (-> k size->bytes bytes->type))
+         max-rows (long (or max-rows 0))
          program-source (-> distance-configuration :program io/resource slurp)
          program (program-with-source ctx [program-source])
          prog (try
@@ -245,6 +305,30 @@
                           (println "Failed to compile fused kernel:" (.getMessage e))
                           (when fused-program (println (build-log fused-program dev)))
                           nil)))
+         fused-kernel-name (-> distance-configuration :fused-kernel)
+         fused-cl-matrix (when (and fused-prog (pos? max-rows))
+                           (cl-buffer ctx (* max-rows (long length) Float/BYTES) :read-only))
+         fused-cl-assignments (when (and fused-prog (pos? max-rows))
+                                (cl-buffer ctx (* max-rows (long (size->bytes k))) :write-only))
+         fused-host-matrix (when (and fused-prog (pos? max-rows))
+                             (fge max-rows (long length) {:layout :row}))
+         fused-cl-kernel (when (and fused-prog fused-kernel-name)
+                           (kernel fused-prog fused-kernel-name))
+         reduce-program-source (when k
+                                 (some-> distance-configuration :reduce-program io/resource slurp))
+         reduce-program (when reduce-program-source
+                          (program-with-source ctx [reduce-program-source]))
+         reduce-prog (when reduce-program
+                       (try
+                         (build-program! reduce-program
+                                         (str "-DSIZE=" length
+                                              " -DMAX_CLUSTERS=" k
+                                              " -DLOCAL_SIZE=" reduce-local-size)
+                                         channel)
+                         (catch Exception e
+                           (println "Failed to compile fused reduce kernel:" (.getMessage e))
+                           (when reduce-program (println (build-log reduce-program dev)))
+                           nil)))
          gpu-context-map {:chan channel
                           :dev dev
                           :kernel  (-> distance-configuration :kernel)
@@ -260,23 +344,41 @@
                           :sum-kernel "sum_by_group"
                           :fused-program fused-program
                           :fused-prog fused-prog
-                          :fused-kernel (-> distance-configuration :fused-kernel)}]
+                          :fused-kernel fused-kernel-name
+                          :fused-cl-kernel fused-cl-kernel
+                          :fused-cl-matrix fused-cl-matrix
+                          :fused-cl-assignments fused-cl-assignments
+                          :fused-host-matrix fused-host-matrix
+                          :fused-max-rows max-rows
+                          :fused-cols (long length)
+                          :reduce-program reduce-program
+                          :reduce-prog reduce-prog
+                          :reduce-kernel (-> distance-configuration :reduce-kernel)
+                          :reduce-local-size reduce-local-size}]
      (reset! gpu-context gpu-context-map)
      gpu-context-map)))
 
 
 (defn get-device-context
-  [configuration matrix]
-  (let [device  (->
-                 (platforms)
-                 (first)
-                 (devices)
-                 (first))
-        distance-configuration (-> configuration
-                                   :distance-key
-                                   gpu-accelerated)
-        k (-> configuration :k)]
-    (setup-device k distance-configuration (ncols matrix) device)))
+  ([configuration matrix]
+   (get-device-context configuration matrix (mrows matrix)))
+  ([configuration matrix max-rows]
+   (let [device  (->
+                  (platforms)
+                  (first)
+                  (devices)
+                  (first))
+         distance-configuration (-> configuration
+                                    :distance-key
+                                    gpu-accelerated)
+         k (-> configuration :k)]
+     (setup-device k distance-configuration (ncols matrix) device max-rows))))
+
+
+(defn max-point-row-count
+  [conf]
+  (when (:points conf)
+    (reduce max 0 (map ds/row-count (p/read-dataset-seq conf :points)))))
 
 
 ;; During Lloyd iteration it is common to re-use the same centroids while processing 
@@ -291,12 +393,9 @@
         cols (ncols centroids)
         cl-centroids (cl-buffer ctx (* k cols Float/BYTES) :read-only) 
         ^FloatPointer centroids-ptr (buffer centroids)
-        centroids-array (float-array (.capacity centroids-ptr))]
+        centroids-buffer (float-pointer-byte-buffer centroids-ptr)]
 
-    (.get centroids-ptr centroids-array)
-
-    (enq-write! cqueue cl-centroids centroids-array)
-
+    (enq-write! cqueue cl-centroids centroids-buffer)
     (swap! gpu-context assoc :cl-centroids cl-centroids)
     (swap! gpu-context assoc :k k)))
 
@@ -330,22 +429,29 @@
   "Tearsdown an OpenCL device."
   ([] (teardown-device @gpu-context))
   ([device-context]
+   (doseq [k [:fused-cl-kernel :fused-cl-matrix :fused-cl-assignments :fused-host-matrix]]
+     (when-let [resource (k device-context)]
+       (clojurecl/release resource)))
    (doseq [k [:dev :ctx :cqueue :program :prog :min-program :min-prog :sum-program :sum-prog]]
      (clojurecl/release (k device-context)))
    ;; Release fused kernel resources if they were compiled
    (when-let [fp (:fused-program device-context)] (clojurecl/release fp))
-   (when-let [fp (:fused-prog device-context)] (clojurecl/release fp))))
+   (when-let [fp (:fused-prog device-context)] (clojurecl/release fp))
+   (when-let [rp (:reduce-program device-context)] (clojurecl/release rp))
+   (when-let [rp (:reduce-prog device-context)] (clojurecl/release rp))))
 
 
 (defmacro with-gpu-context
   [conf & forms]
-  `(do
-     (get-device-context ~conf
-                          (dataset->matrix
-                           ~conf 
-                           (if (not (nil? (:centroids ~conf)))
-                             (:centroids ~conf)
-                             (first (p/read-dataset-seq ~conf :points)))))
+  `(let [conf# ~conf
+         setup-matrix# (dataset->matrix
+                        conf#
+                        (if (not (nil? (:centroids conf#)))
+                          (:centroids conf#)
+                          (first (p/read-dataset-seq conf# :points))))
+         max-rows# (max (long (mrows setup-matrix#))
+                        (long (or (max-point-row-count conf#) 0)))]
+     (get-device-context conf# setup-matrix# max-rows#)
      (try
        ~@forms
        (finally
@@ -531,38 +637,172 @@
 ;; minimum in registers, writing only the final assignment index.
 (defn gpu-fused-assign
   "Computes distance + argmin in a single kernel, returning assignment indices.
-   Eliminates the intermediate N*K distance matrix entirely."
-  [device-context matrix]
-  (let [num-clusters (long (:k device-context))
-        n (long (mrows matrix))
-        cols (long (ncols matrix))
-        global-size (long 1024)
-        num-per (work-item-batches n global-size)
-        global-work-size [global-size]
-        work-size (work-size global-work-size)
-        ^FloatPointer matrix-ptr (buffer matrix)
-        matrix-array (float-array (.capacity matrix-ptr))
-        _ (.get matrix-ptr matrix-array)
-        min-indices (create-min-index-result-array num-clusters n)
-        cqueue (:cqueue device-context)
-        cl-centroids (:cl-centroids device-context)]
-    (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
-                   cl-assignments (create-min-index-buffer (:ctx device-context) num-clusters n)
-                   cl-kernel (kernel (:fused-prog device-context) (:fused-kernel device-context))]
-      (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
-                 (int-array [num-per]) (int-array [n]) (int-array [num-clusters]))
-      (enq-write! cqueue cl-matrix matrix-array)
-      (enq-kernel! cqueue cl-kernel work-size)
-      (enq-read! cqueue cl-assignments min-indices)
-      (finish! cqueue)
-      min-indices)))
+   Eliminates the intermediate N*K distance matrix entirely.
+   Accepts an explicit `n` (valid row count) so a matrix pre-allocated at
+   max-rows can be reused across chunks without zero-initializing on each call."
+  ([device-context matrix]
+   (gpu-fused-assign device-context matrix (long (mrows matrix))
+                     (or (:fused-local-size device-context) 128)))
+  ([device-context matrix n]
+   (gpu-fused-assign device-context matrix n
+                     (or (:fused-local-size device-context) 128)))
+  ([device-context matrix n local-size]
+   (let [num-clusters (long (:k device-context))
+         n (long n)
+         cols (long (:fused-cols device-context))
+         max-rows (long (or (:fused-max-rows device-context) 0))
+         local-size (long local-size)
+         _ (when-not (pos? local-size)
+             (throw (IllegalArgumentException. "local-size must be positive")))
+         global-size (long (round-up-to-multiple n local-size))
+         global-work-size [global-size]
+         local-work-size [local-size]
+         work-size (work-size global-work-size local-work-size)
+         ^FloatPointer matrix-ptr (buffer matrix)
+         matrix-buffer (doto (.asByteBuffer matrix-ptr)
+                         (.limit (int (* n cols Float/BYTES))))
+         min-indices (create-min-index-result-array num-clusters n)
+         cqueue (:cqueue device-context)
+         cl-centroids (:cl-centroids device-context)
+         cl-matrix (:fused-cl-matrix device-context)
+         cl-assignments (:fused-cl-assignments device-context)
+         cl-kernel (:fused-cl-kernel device-context)]
+     (when (some nil? [cl-matrix cl-assignments cl-kernel])
+       (throw (IllegalStateException.
+               "Fused assignment OpenCL objects were not initialized on the device context.")))
+     (when (> n max-rows)
+       (throw (IllegalArgumentException.
+               (str "Fused assignment chunk has " n
+                    " rows, but the reusable OpenCL buffer was sized for "
+                    max-rows " rows."))))
+     (set-args! cl-kernel cl-assignments cl-matrix cl-centroids
+                (int-array [1]) (int-array [n]) (int-array [num-clusters]))
+     (enq-write! cqueue cl-matrix matrix-buffer)
+     (enq-kernel! cqueue cl-kernel work-size)
+     (enq-read! cqueue cl-assignments min-indices)
+     (finish! cqueue)
+     min-indices)))
+
+
+(defn reduce-accelerated?
+  "Returns true when the fused assign+partial-reduce kernel is available.
+   Checks both that the distance has a `:reduce-program` source registered
+   AND, if a GPU context is currently live, that the runtime kernel build
+   actually succeeded. The OpenCL build can fail at runtime on GPUs whose
+   shared-memory budget is too small for the kernel (we've seen Ampere
+   ptxas reject `fused_emd_assign_reduce` for using 162 KB of shared
+   memory when the device max is 48 KB), in which case the static config
+   would lie and Lloyd would crash inside the loop. Treating runtime
+   kernel-build failure as 'not accelerated' keeps the fallback path
+   honest."
+  [conf]
+  (and (boolean (c/get-in gpu-accelerated [(:distance-key conf) :reduce-program]))
+       (let [ctx @gpu-context]
+         (or (nil? ctx)            ;; no GPU context yet — answer based on static config
+             (some? (:reduce-prog ctx))))))
+
+
+(c/defn- reduce-block-partials
+  [partial-sums partial-counts partial-inertia block-count num-clusters dims]
+  (let [^floats partial-sums partial-sums
+        ^ints partial-counts partial-counts
+        ^floats partial-inertia partial-inertia
+        block-count (long block-count)
+        num-clusters (long num-clusters)
+        dims (long dims)
+        sum-count (* num-clusters dims)
+        sums (double-array sum-count)
+        counts (int-array num-clusters)]
+    (c/loop [block (long 0)
+             inertia 0.0]
+      (if (>= block block-count)
+        {:sums sums
+         :counts counts
+         :inertia inertia}
+        (let [sum-offset (* block sum-count)
+              count-offset (* block num-clusters)]
+          (dotimes [i sum-count]
+            (aset sums i (+ (aget sums i)
+                            (double (aget partial-sums (int (+ sum-offset i)))))))
+          (dotimes [c num-clusters]
+            (aset counts c (int (+ (aget counts c)
+                                    (aget partial-counts (int (+ count-offset c)))))))
+          (recur (inc block)
+                 (+ inertia (double (aget partial-inertia (int block))))))))))
+
+
+(defn gpu-fused-assign-and-reduce
+  "Computes Euclidean-squared assignment and per-block centroid partials on the
+   GPU, then reduces block partials on the CPU in double precision.
+   Accepts an explicit `n` (valid row count) so a matrix pre-allocated at
+   max-rows can be reused across chunks.
+   Returns {:sums double-array :counts int-array :inertia double}."
+  ([device-context matrix]
+   (gpu-fused-assign-and-reduce device-context matrix (long (mrows matrix))))
+  ([device-context matrix n]
+   (when-not (:reduce-prog device-context)
+     (throw (ex-info (str "Fused assign+reduce is unavailable for "
+                          (:distance-key device-context)
+                          "; only distances with a :reduce-program are supported.")
+                     {:distance-key (:distance-key device-context)})))
+   (let [num-clusters (long (:k device-context))
+         n (long n)
+         cols (long (:fused-cols device-context))]
+     (if (zero? n)
+       {:sums (double-array (* num-clusters cols))
+        :counts (int-array num-clusters)
+        :inertia 0.0}
+       (let [local-size (long (:reduce-local-size device-context))
+             block-count (long (work-item-batches n local-size))
+             global-size (long (rounded-global-size n local-size))
+             work-size (work-size [global-size] [local-size])
+             partial-sum-count (* block-count num-clusters cols)
+             partial-count-count (* block-count num-clusters)
+             partial-sums (float-array partial-sum-count)
+             partial-counts (int-array partial-count-count)
+             partial-inertia (float-array block-count)
+             ^FloatPointer matrix-ptr (buffer matrix)
+             matrix-buffer (doto (.asByteBuffer matrix-ptr)
+                             (.limit (int (* n cols Float/BYTES))))
+             cqueue (:cqueue device-context)
+             cl-centroids (:cl-centroids device-context)]
+         (with-release [cl-matrix (cl-buffer (:ctx device-context) (* n cols Float/BYTES) :read-only)
+                        cl-partial-sums (cl-buffer (:ctx device-context) (* partial-sum-count Float/BYTES) :write-only)
+                        cl-partial-counts (cl-buffer (:ctx device-context) (* partial-count-count Integer/BYTES) :write-only)
+                        cl-partial-inertia (cl-buffer (:ctx device-context) (* block-count Float/BYTES) :write-only)
+                        cl-kernel (kernel (:reduce-prog device-context) (:reduce-kernel device-context))]
+           (set-args! cl-kernel cl-matrix cl-centroids
+                      cl-partial-sums cl-partial-counts cl-partial-inertia
+                      (int-array [n]) (int-array [num-clusters]))
+           (enq-write! cqueue cl-matrix matrix-buffer)
+           (enq-kernel! cqueue cl-kernel work-size)
+           (enq-read! cqueue cl-partial-sums partial-sums)
+           (enq-read! cqueue cl-partial-counts partial-counts)
+           (enq-read! cqueue cl-partial-inertia partial-inertia)
+           (finish! cqueue)
+           (reduce-block-partials partial-sums partial-counts partial-inertia
+                                  block-count num-clusters cols)))))))
 
 
 (defn fused-minimum-index
-  "Returns nearest-centroid indices using the fused distance+argmin kernel."
+  "Returns nearest-centroid indices using the fused distance+argmin kernel.
+
+   Releases the per-chunk host Neanderthal matrix after the GPU enqueue
+   copies its bytes into the reusable `cl-matrix` OpenCL buffer. Without
+   this release, a one-pass assignment over a large dataset (e.g. turn
+   persist on ~2·10⁹ rows / ~2·10⁵ record batches) accumulates megabytes
+   per call of native off-heap allocations that the JVM cleaner can't
+   reclaim fast enough under sustained pressure, and the container ends
+   up SIGKILL'd by userspace OOM protection before the pass completes.
+   Matches the release pattern in neighbouring `minimum-index` /
+   `minimum-distance` and the explicit `uc/release` contract documented
+   on `q-of-x`."
   [conf ds]
   (let [ds-matrix (dataset->matrix conf ds)]
-    (gpu-fused-assign @gpu-context ds-matrix)))
+    (try
+      (gpu-fused-assign @gpu-context ds-matrix)
+      (finally
+        (clojurecl/release ds-matrix)))))
 
 
 ;; The GPU is so much faster than the CPU that we should be preferring
@@ -586,15 +826,21 @@
 
 (defn minimum-distance
   [conf ds centroid-ds]
-  (let [ds-matrix (dataset->matrix conf ds) 
+  (let [ds-matrix (dataset->matrix conf ds)
         row-count (ds/row-count ds)
         centroid-matrix (dataset->matrix conf centroid-ds)
-        col-count (ds/row-count centroid-ds) 
-        distances (fge row-count col-count (gpu-distance @gpu-context ds-matrix centroid-matrix) {:layout :row})]
-    (fv (hfln/map (fn [m] (entry m (imin m))) (rows distances)))))
+        col-count (ds/row-count centroid-ds)
+        distances (fge row-count col-count (gpu-distance @gpu-context ds-matrix centroid-matrix) {:layout :row})
+        result (fv (hfln/map (fn [m] (entry m (imin m))) (rows distances)))]
+    (clojurecl/release ds-matrix)
+    (clojurecl/release centroid-matrix)
+    (clojurecl/release distances)
+    result))
 
 
 (defn minimum-index
   [conf ds]
-  (let [ds-matrix (dataset->matrix conf ds)]
-    (gpu-distance-min-index @gpu-context ds-matrix)))
+  (let [ds-matrix (dataset->matrix conf ds)
+        result (gpu-distance-min-index @gpu-context ds-matrix)]
+    (clojurecl/release ds-matrix)
+    result))

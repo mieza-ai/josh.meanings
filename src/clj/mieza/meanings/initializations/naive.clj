@@ -7,9 +7,8 @@
    [mieza.meanings.persistence :as persist]
    [mieza.meanings.initializations.utils :refer [centroids->dataset uniform-sample]]
    [clojure.spec.alpha :as s]
-   [clojure.test :refer [is]])
-  (:use
-   [mieza.meanings.initializations.core]))
+   [clojure.test :refer [is]]
+   [mieza.meanings.initializations.core :refer [initialize-centroids]]))
 
 
 ;; Specs used in this file

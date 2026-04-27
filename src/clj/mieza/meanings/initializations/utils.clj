@@ -1,26 +1,24 @@
 (ns mieza.meanings.initializations.utils
   "Utilities to help with rapid k mean cluster initialization."
-  (:refer-clojure
-   :exclude
-   [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-])
-  (:use [mieza.meanings.specs])
+  (:refer-clojure :exclude [assoc defn fn get let])
   (:require [bigml.sampling.reservoir :as res-sample]
             [clojure.spec.alpha :as s]
             [ham-fisted.reduce :as hamfr]
             [ham-fisted.lazy-noncaching :as hfl]
             [mieza.meanings.persistence :as p]
             [mieza.meanings.records.clustering-state]
+            [mieza.meanings.specs]
             [taoensso.timbre :as log]
             [tech.v3.dataset :as ds]
             [tech.v3.dataset.neanderthal :as ds-nean]
+            [tech.v3.datatype :as dtype]
             [tech.v3.datatype.functional :as dfn]
+            [uncomplicate.commons.core :as uc]
             [uncomplicate.neanderthal
              [random :refer [rand-uniform!]]
              [native :as native]]
-            [uncomplicate.neanderthal.vect-math :as vm]
-            [ham-fisted.api :as hamf]
             [clojure.core :as c]
-            [clj-fast.clojure.core :refer [get nth assoc get-in merge assoc-in update-in select-keys destructure let fn loop defn defn-]])
+            [clj-fast.clojure.core :refer [assoc defn fn get let]])
   (:import [mieza.meanings.records.clustering_state KMeansState]))
 
 
@@ -76,7 +74,7 @@
 (def reservoir-sampling-max-heap-comparator
   (reify java.util.Comparator
     (compare
-     [this item1 item2]
+     [_this item1 item2]
      (compare (get item2 :res-rank)  (get item1 :res-rank)))))
 
 
@@ -111,34 +109,62 @@
 ;; 8. Test version which does full res-rank calculation in neanderthal.
 (defn reservoir-rank
   [dataset column-name]
-  (let [rand-dataset (ds/rename-columns (ds-nean/dense->dataset (generate-random-buffer dataset)) [:random])]
-    (assoc dataset :res-rank (dfn/pow (rand-dataset :random) (dfn// 1 (dataset column-name))))))
+  (let [rand-buf (generate-random-buffer dataset)
+        rand-dataset (ds/rename-columns (ds-nean/dense->dataset rand-buf) [:random])
+        result (assoc dataset :res-rank (dfn/pow (rand-dataset :random) (dfn// 1 (dataset column-name))))]
+    (uc/release rand-buf)
+    result))
+
+
+(defn- peek-res-rank
+  "Reads :res-rank on the heap's current top without paying per-call boxing
+   overhead in the surrounding hot loop; still one boxed lookup per call
+   but now only invoked when the threshold cache is refreshed."
+  ^double [^java.util.concurrent.PriorityBlockingQueue acc]
+  (if-let [top (.peek acc)]
+    (double (get top :res-rank))
+    Double/NEGATIVE_INFINITY))
 
 
 (defn weighted-sample
   [ds-seq weight-col ^long k]
-  (let [add-to-queue  (fn ^java.util.concurrent.PriorityBlockingQueue
-                        [^java.util.concurrent.PriorityBlockingQueue acc ds]
-                        (doseq [row (ds/rows (if (< (.size acc) k)
-                                               ds
-                                               (let [lowest (get (.peek acc) :res-rank)]
-                                                 (ds/filter-column ds :res-rank (fn [x] (>= x lowest))))))]
-                          (if (< (.size acc) k)
-                            (.add acc row)
-                            (when (< (get (.peek acc) :res-rank) (get row :res-rank))
-                              (.poll acc)
-                              (.add acc row))))
-                        acc)
-        merge-queues (fn ^java.util.concurrent.PriorityBlockingQueue
-                       [^java.util.concurrent.PriorityBlockingQueue acc
-                        ^java.util.concurrent.PriorityBlockingQueue rows]
-                       (doseq [row rows]
-                         (when (< (get (.peek acc) :res-rank) (get row :res-rank))
-                           (.poll acc)
-                           (.add acc row)))
-                       (while (> (.size acc) k)
-                         (.poll acc))
-                       acc)
+  (let [add-to-queue
+        (fn ^java.util.concurrent.PriorityBlockingQueue
+          [^java.util.concurrent.PriorityBlockingQueue acc ds]
+          ;; Read :res-rank once as a primitive DoubleReader so the inner
+          ;; loop compares raw doubles instead of calling Dataset.readObject
+          ;; (which boxes every column value via Double/valueOf).
+          (let [^tech.v3.datatype.Buffer rank-reader (dtype/->reader (ds :res-rank) :float64)
+                ^java.util.List rows (ds/rows ds)
+                n (.lsize rank-reader)
+                ;; Cache the heap's smallest rank so we only refresh it when
+                ;; the heap actually changes; avoids a per-row (get peek) box.
+                threshold (double-array 1)
+                _ (aset threshold 0 (if (< (.size acc) k)
+                                      Double/NEGATIVE_INFINITY
+                                      (peek-res-rank acc)))]
+            (dotimes [i n]
+              (let [rank (.readDouble rank-reader i)]
+                (when (< (aget threshold 0) rank)
+                  (if (< (.size acc) k)
+                    (do (.add acc (.get rows (int i)))
+                        (when (>= (.size acc) k)
+                          (aset threshold 0 (peek-res-rank acc))))
+                    (do (.poll acc)
+                        (.add acc (.get rows (int i)))
+                        (aset threshold 0 (peek-res-rank acc)))))))
+            acc))
+        merge-queues
+        (fn ^java.util.concurrent.PriorityBlockingQueue
+          [^java.util.concurrent.PriorityBlockingQueue acc
+           ^java.util.concurrent.PriorityBlockingQueue rows]
+          (doseq [row rows]
+            (when (< (peek-res-rank acc) (double (get row :res-rank)))
+              (.poll acc)
+              (.add acc row)))
+          (while (> (.size acc) k)
+            (.poll acc))
+          acc)
         ^java.util.concurrent.PriorityBlockingQueue q
         (->> ds-seq
              (hfl/map (fn [dataset] (reservoir-rank dataset weight-col)))
@@ -152,11 +178,34 @@
 
 (s/fdef sample-one :args (s/cat :conf t-config) :ret t-dataset)
 (defn sample-one
-  "Returns a single item from a near uniform sample of the points dataset in conf.
-   In practice this sample is slightly biased towards elements in the final sequences 
-   as for the sake of speed we skip weighting based on row count."
+  "Returns a one-row dataset drawn from the :points collection. Picks
+   uniformly within a record batch chosen uniformly among batches.
+
+   Why not the obvious `rand-nth (concat-all-rows)`: concatenating all
+   rows across ~10^5 Arrow batches of a 70 GB mmap'd file to pick one
+   point was the dominant cost of a fresh stage start — observed at
+   multiple hours on a 71 GB turn.arrow because each per-batch
+   `ds/rand-nth` materialized a full row via `hamf/vec` across 200+
+   Arrow-backed columns, one potential page fault per column read,
+   times ~10^5 batches in parallel pmap. That is O(N) work for an
+   O(1) question and it swamps real compute (qx-denominator, q-of-x!,
+   Lloyd) that genuinely needs to touch every point.
+
+   Realizing the seq of Dataset objects (vec) does not touch row data —
+   each Dataset is a wrapper over column Buffers that is created
+   lazily without paging in the underlying Arrow bytes. `ds/select-rows`
+   with a one-element index vector is a zero-copy view projection.
+
+   Bias: weighted by batch-size inverse rather than uniform across all
+   rows. Acceptable because AFK-MC² only uses this for its first
+   centroid, whose placement is compensated for by the q(x)
+   distribution computed in the next step; the algorithm's theoretical
+   guarantees do not require uniform first-centroid sampling."
   [conf]
-  (ds/->dataset [(rand-nth (into [] (hamf/pmap ds/rand-nth (p/read-dataset-seq conf :points))))]))
+  (let [batches (vec (p/read-dataset-seq conf :points))
+        batch   (c/rand-nth batches)
+        idx     (c/rand-int (ds/row-count batch))]
+    (ds/select-rows batch [idx])))
 
 
 (def ^:const d2-weight-col "__d2_weight")
