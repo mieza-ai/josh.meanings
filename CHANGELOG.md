@@ -10,6 +10,8 @@ releases might only add additional tests and/or documentation updates rather tha
 
 ### Added
 
+- `:afk-chains-per-pass` option for `:afk-mc` (default 25): how many chains' proposals one pass over q(x) draws.
+
 - GitHub issue and PR templates, `CODEOWNERS`, `AGENTS.md`, `llms.txt`, and `llms-full.txt`.
 - cljdoc sidebar config (`doc/cljdoc.edn`) and `:scm` metadata in `project.clj` for published docs.
 - GitHub Actions CI workflow (`ci.yml`) and Dependabot updates for GitHub Actions.
@@ -18,6 +20,7 @@ releases might only add additional tests and/or documentation updates rather tha
 
 ### Changed
 
+- AFK-MC² draws the proposals of several chains (`:afk-chains-per-pass`) in one weighted pass over q(x), instead of one full pass per centroid. q(x) does not depend on the centroids already chosen, so this changes only which chain gets which proposals (no point appears in two chains of one pass). A 500-centroid seeding over 2.8B points goes from 500 passes (about 34 hours) to 20. Small datasets keep one chain per pass.
 - README quick start now matches the current `ClusterResult` / `save-model` / `load-model` / `assignments` API; added CI, cljdoc, and MIT badges.
 - Docstrings expanded for `k-means`, `k-means-seq`, and the `Classifier` / `Savable` protocols.
 - `CONTRIBUTING` describes GitHub Actions; ignore stray `*.nippy` test artifacts.
