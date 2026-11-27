@@ -293,6 +293,55 @@
   (mcmc-sample conf (samples conf) clusters))
 
 
+(def ^:const afk-chains-per-pass
+  "How many chains' proposals one pass over q(x) draws, at most. Each pass
+   reads every point (2.8B on the HUNL river) and took about 4 minutes
+   there, so drawing one chain per pass made a 500-centroid seeding take
+   about 34 hours; 25 chains per pass makes it 20 passes. A pass holds
+   chains * m proposals (about 2.4M rows at k = 500 on the river)."
+  25)
+
+
+(defn chains-per-pass
+  "How many chains to draw per pass over q(x): `:afk-chains-per-pass` from
+   conf (default `afk-chains-per-pass`), but no more than `remaining`, and
+   no more than a quarter of the points allow, so a pass never draws more
+   than a quarter of the dataset without replacement. One on small data,
+   which is the original one-chain-per-pass sampling."
+  ^long [conf ^long remaining]
+  (let [wanted (long (c/get conf :afk-chains-per-pass afk-chains-per-pass))
+        m (long (:m conf))
+        fit (quot (long (:size-estimate conf)) (* 4 m))]
+    (max 1 (min wanted remaining fit))))
+
+
+(defn chain-proposals
+  "Proposals for `chains` Markov chains from one pass over q(x).
+
+   q(x) is fixed once the first centroid is chosen (Bachem et al. 2016,
+   Algorithm 1 line 11 draws every chain's proposals from it); only the
+   acceptance ratio depends on the centroids so far. So the proposals of
+   several chains can come from one weighted draw of chains * m points,
+   shuffled and split into chains of m. Each chain sees m proposals drawn
+   from q(x) in random order, as `samples` gives one chain, except that no
+   point appears in two chains of one pass. With one chain this is exactly
+   `samples`."
+  [conf chains]
+  (if (= 1 (long chains))
+    [(samples conf)]
+    (let [chains (long chains)
+          m (long (:m conf))
+          pooled (-> (weighted-sample (load-datasets-with-qx conf) qx-column-name (* chains m))
+                     (ds/->dataset)
+                     (ds/shuffle))
+          n (long (ds/row-count pooled))]
+      (when (< n (* chains m))
+        (throw (ex-info "q(x) gave fewer proposals than the chains need"
+                        {:chains chains :m m :drawn n})))
+      (mapv (fn [i] (ds/select-rows pooled (range (* (long i) m) (* (inc (long i)) m))))
+            (range chains)))))
+
+
 (s/fdef k-means-assumption-free-mc-initialization :args (s/cat :conf :mieza.meanings.specs/configuration) :ret :mieza.meanings.specs/points)
 (defn k-means-assumption-free-mc-initialization
   "Runs AFK-MC² to pick k centroids.
@@ -323,16 +372,22 @@
           _            (q-of-x! conf initial)
           progress-bar (pr/progress-bar k)
           _            (println "Sampling clusters...")
+          ;; Each new centroid runs one chain. Its proposals come from a
+          ;; pass over q(x) shared with up to (chains-per-pass) chains.
           final-clusters
-          (loop [clusters initial]
+          (loop [clusters initial
+                 pending  []]
             (let [centroid-count (ds/row-count clusters)]
               (pr/print (pr/tick progress-bar centroid-count))
               (if (< centroid-count k)
-                (let [next-clusters (ds/concat clusters (find-next-cluster conf clusters))]
+                (let [pending (if (seq pending)
+                                pending
+                                (chain-proposals conf (chains-per-pass conf (- k centroid-count))))
+                      next-clusters (ds/concat clusters (mcmc-sample conf (first pending) clusters))]
                   (when (zero? (mod (ds/row-count next-clusters)
                                     afk-centroids-checkpoint-every))
                     (write-afk-checkpoint! conf next-clusters))
-                  (recur next-clusters))
+                  (recur next-clusters (subvec pending 1)))
                 clusters)))]
       ;; Persist the completed set so a crash in downstream steps
       ;; (transform/load) doesn't force a full AFK redo on retry.

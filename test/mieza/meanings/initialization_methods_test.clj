@@ -3,6 +3,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.java.io :as io]
             [clojure.data.csv :as csv]
+            [mieza.meanings.initializations.afk :as afk]
             [mieza.meanings.kmeans :refer [k-means k-means-seq]]
             [tech.v3.dataset :as ds]))
 
@@ -119,3 +120,42 @@
       (is (= :afk-mc (:init conf)))
       (is (vector? (:col-names conf)))
       (is (= #{"a" "b"} (set (:col-names conf)))))))
+
+
+;; AFK-MC² drawing several chains' proposals in one pass over q(x)
+
+(def ^:private many-distinct-points
+  "20,000 points with distinct coordinates, so a repeated row means a
+   repeated draw."
+  (into [["a" "b"]]
+        (for [i (range 20000)] [i (mod (* 7 i) 10007)])))
+
+(deftest afk-draws-several-chains-per-pass
+  (with-test-csv "test.init.afk-batch.csv" many-distinct-points
+    (let [calls (atom [])
+          draw afk/chain-proposals]
+      (with-redefs [afk/chain-proposals
+                    (fn [conf chains]
+                      (let [chains-drawn (draw conf chains)
+                            rows (mapcat #(ds/rowvecs (ds/select-columns % (:col-names conf))) chains-drawn)]
+                        (swap! calls conj {:chains chains
+                                           :sizes (mapv ds/row-count chains-drawn)
+                                           :m (:m conf)
+                                           :rows (count rows)
+                                           :distinct (count (set rows))})
+                        chains-drawn))]
+        (let [result (k-means "test.init.afk-batch.csv" 5
+                              :distance-key :euclidean
+                              :init :afk-mc
+                              :m 20
+                              :afk-chains-per-pass 4)
+              [{:keys [chains sizes m rows distinct]} :as passes] @calls]
+          (testing "the four chains after the first centroid come from one pass"
+            (is (= 1 (count passes)))
+            (is (= 4 chains))
+            (is (= [20 20 20 20] sizes))
+            (is (= 20 m)))
+          (testing "no point is drawn twice in a pass"
+            (is (= rows distinct)))
+          (testing "five distinct centroids"
+            (is (= 5 (count (set (ds/rowvecs (:centroids result))))))))))))

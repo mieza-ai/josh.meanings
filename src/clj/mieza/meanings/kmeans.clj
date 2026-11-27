@@ -170,7 +170,7 @@
   "Sets initial configuration options for the k means calculation."
   [points-file k options]
   (let [{:keys [format init distance-key m fused-assign fused-reduce on-progress
-                lloyd-checkpoint-path lloyd-checkpoint-every]} (merge default-options options)
+                lloyd-checkpoint-path lloyd-checkpoint-every afk-chains-per-pass]} (merge default-options options)
         points-file (persist/convert-file points-file format)
         col-names (get options :columns (column-names points-file))
         state (assoc (->KMeansState
@@ -190,7 +190,8 @@
     (cond-> state
       on-progress (assoc :on-progress on-progress)
       lloyd-checkpoint-path (assoc :lloyd-checkpoint-path lloyd-checkpoint-path)
-      lloyd-checkpoint-every (assoc :lloyd-checkpoint-every lloyd-checkpoint-every))))
+      lloyd-checkpoint-every (assoc :lloyd-checkpoint-every lloyd-checkpoint-every)
+      afk-chains-per-pass (assoc :afk-chains-per-pass afk-chains-per-pass))))
 
 
 (defn assignments-api
